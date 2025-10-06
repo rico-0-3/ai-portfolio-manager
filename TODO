@@ -1,0 +1,6 @@
+- Finisci installazione pacchetti con requirements e fai opeazioni dopo su setup.sh
+- SISTEMARE USO DI TA-LIB in technical analisys: attualmente non sembra venga fatta distinzione.
+- Sistemare script di installazione TA-LIB che non trova venv
+- Testare il tutto
+- Rendere il funzionamento dinamico: viene lasciato eseguito e ogni tot fa le analii che deve fare (magari aggiungi un service). Stampa sempre il risultato come ora
+- Al posto di stamapre il risultato collega a broker e fai fare operazioni vere
