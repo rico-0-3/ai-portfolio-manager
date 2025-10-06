@@ -14,7 +14,7 @@ lxml>=4.9.0
 # Technical Analysis (TA-Lib is optional, system works without it)
 # TA-Lib requires: sudo apt-get install ta-lib (Ubuntu) or brew install ta-lib (macOS)
 # Uncomment if you have TA-Lib installed:
-# TA-Lib>=0.4.28
+TA-Lib>=0.4.28
 
 # Machine Learning - Core
 scikit-learn>=1.3.0,<1.6.0
