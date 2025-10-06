@@ -46,8 +46,15 @@ tar -xzf ta-lib-0.4.0-src.tar.gz
 cd ta-lib/
 
 echo ""
-echo -e "${YELLOW}Step 4/6: Configuring and compiling TA-Lib (this may take a few minutes)...${NC}"
-./configure --prefix=/usr
+echo -e "${YELLOW}Step 4/6: Updating config scripts for ARM64 compatibility...${NC}"
+# Download updated config.guess and config.sub for ARM64 support
+wget -O config.guess 'http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD'
+wget -O config.sub 'http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD'
+chmod +x config.guess config.sub
+
+echo ""
+echo -e "${YELLOW}Step 5/6: Configuring and compiling TA-Lib (this may take a few minutes)...${NC}"
+./configure --prefix=/usr --build=aarch64-unknown-linux-gnu
 make
 
 echo ""
