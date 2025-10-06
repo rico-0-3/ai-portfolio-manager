@@ -1,0 +1,182 @@
+# AI Portfolio Manager - Configuration File
+
+# Data Sources
+data:
+  # Yahoo Finance settings
+  yfinance:
+    enabled: true
+    default_period: "5y"
+    default_interval: "1d"
+
+  # Alpha Vantage settings
+  alpha_vantage:
+    enabled: true
+    api_key: "QSVZPWKFMUM9RBPC"  # Get free key at https://www.alphavantage.co/
+    rate_limit: 5  # requests per minute
+
+  # News API for sentiment
+  news_api:
+    enabled: true
+    api_key: "f0f32e5766d9458590ee7cb109d189d2"  # Get at https://newsapi.org/
+    sources: ["bloomberg", "reuters", "financial-times"]
+
+# Portfolio Settings
+portfolio:
+  initial_budget: 10000  # Initial capital in USD
+  max_positions: 20  # Maximum number of stocks
+  max_single_position: 0.20  # Max 20% per single stock
+  min_single_position: 0.02  # Min 2% per single stock
+  rebalance_frequency: "weekly"  # daily, weekly, monthly
+  transaction_cost: 0.001  # 0.1% per transaction
+
+# Risk Management
+risk:
+  max_drawdown: 0.25  # Maximum 25% drawdown
+  var_confidence: 0.95  # 95% VaR confidence
+  stop_loss_pct: 0.10  # 10% stop loss
+  target_sharpe: 1.5  # Target Sharpe ratio
+
+# Feature Engineering
+features:
+  technical_indicators:
+    - "SMA_20"
+    - "SMA_50"
+    - "SMA_200"
+    - "EMA_12"
+    - "EMA_26"
+    - "RSI_14"
+    - "MACD"
+    - "BBANDS"
+    - "ATR"
+    - "OBV"
+    - "VWAP"
+    - "STOCH"
+
+  lookback_periods:
+    short: 20
+    medium: 60
+    long: 200
+
+# ML Models Configuration
+models:
+  # LSTM settings
+  lstm:
+    enabled: true
+    sequence_length: 60
+    hidden_units: [128, 64, 32]
+    dropout: 0.2
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+
+  # GRU settings
+  gru:
+    enabled: true
+    sequence_length: 60
+    hidden_units: [100, 50]
+    dropout: 0.2
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+
+  # Transformer settings
+  transformer:
+    enabled: true
+    d_model: 128
+    nhead: 8
+    num_layers: 4
+    dropout: 0.1
+    epochs: 100
+    batch_size: 32
+
+  # XGBoost settings
+  xgboost:
+    enabled: true
+    n_estimators: 500
+    max_depth: 7
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+  # LightGBM settings
+  lightgbm:
+    enabled: true
+    n_estimators: 500
+    max_depth: 7
+    learning_rate: 0.05
+    num_leaves: 31
+
+  # Ensemble weights (auto-adjusted based on performance)
+  ensemble:
+    lstm_weight: 0.25
+    gru_weight: 0.20
+    transformer_weight: 0.15
+    xgboost_weight: 0.25
+    lightgbm_weight: 0.15
+
+# Portfolio Optimization
+optimization:
+  # Risk profile: low, medium, high
+  # Determines weights for different optimization methods
+  risk_profile: "medium"  # low, medium, high
+
+  # Risk profile weights for each method (all methods are used together)
+  risk_profiles:
+    low:
+      mean_variance: 0.10      # Conservative Markowitz
+      black_litterman: 0.20    # Incorporates market views
+      risk_parity: 0.35        # Equal risk distribution
+      cvar: 0.20               # Minimize tail risk
+      rl_agent: 0.15           # RL-based dynamic allocation
+    medium:
+      mean_variance: 0.30      # Balanced Markowitz
+      black_litterman: 0.25    # Market views + sentiment
+      risk_parity: 0.15        # Some risk diversification
+      cvar: 0.10               # Moderate tail risk control
+      rl_agent: 0.20           # RL-based dynamic allocation
+    high:
+      mean_variance: 0.45      # Aggressive max Sharpe
+      black_litterman: 0.25    # Leverage market views
+      risk_parity: 0.05        # Less diversification
+      cvar: 0.05               # Minimal tail risk focus
+      rl_agent: 0.20           # RL-based dynamic allocation
+
+  # Markowitz settings
+  mean_variance:
+    risk_free_rate: 0.02
+    target_return: null  # null = max Sharpe
+
+  # Black-Litterman settings
+  black_litterman:
+    tau: 0.05
+    risk_aversion: 2.5
+
+  # RL settings
+  reinforcement_learning:
+    enabled: true
+    algorithm: "PPO"  # PPO, SAC, DDPG
+    training_episodes: 1000
+    learning_rate: 0.0003
+    gamma: 0.99
+
+# Backtesting
+backtesting:
+  start_date: "2019-01-01"
+  end_date: "2024-01-01"
+  train_test_split: 0.8
+  walk_forward_periods: 12
+  benchmark: "SPY"  # S&P 500 ETF
+
+# Logging and Monitoring
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/portfolio_manager.log"
+  rotation: "1 week"
+
+# Paths
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  models: "data/models"
+  results: "data/results"
+  logs: "logs"
