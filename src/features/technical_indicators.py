@@ -16,14 +16,7 @@ try:
     TALIB_AVAILABLE = True
 except ImportError:
     TALIB_AVAILABLE = False
-    logger.warning("TA-Lib not available. Using pandas-ta or custom implementations.")
-
-try:
-    import pandas_ta as ta
-    PANDAS_TA_AVAILABLE = True
-except ImportError:
-    PANDAS_TA_AVAILABLE = False
-    logger.warning("pandas-ta not available. Install with: pip install pandas-ta")
+    logger.warning("TA-Lib not available. Using custom implementations.")
 
 
 class TechnicalIndicators:
@@ -32,8 +25,7 @@ class TechnicalIndicators:
     def __init__(self):
         """Initialize technical indicators calculator."""
         self.talib_available = TALIB_AVAILABLE
-        self.pandas_ta_available = PANDAS_TA_AVAILABLE
-        logger.info(f"TechnicalIndicators initialized (TA-Lib: {TALIB_AVAILABLE}, pandas-ta: {PANDAS_TA_AVAILABLE})")
+        logger.info(f"TechnicalIndicators initialized (TA-Lib: {TALIB_AVAILABLE})")
 
     def add_all_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """

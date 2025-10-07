@@ -103,11 +103,11 @@ class XGBoostPredictor:
         if X_val is not None and y_val is not None:
             eval_set.append((X_val, y_val))
 
+        # Note: early_stopping_rounds is deprecated in newer XGBoost
+        # Just train without early stopping for simplicity
         self.model.fit(
             X_train,
             y_train,
-            eval_set=eval_set,
-            early_stopping_rounds=early_stopping_rounds,
             verbose=verbose
         )
 

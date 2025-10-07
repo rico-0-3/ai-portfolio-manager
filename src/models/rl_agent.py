@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
 import logging
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 
 logger = logging.getLogger(__name__)
 
@@ -84,14 +84,20 @@ class PortfolioEnv(gym.Env):
 
         self.reset()
 
-    def reset(self):
-        """Reset environment."""
+    def reset(self, seed=None, options=None):
+        """Reset environment (Gymnasium API)."""
+        if seed is not None:
+            np.random.seed(seed)
+
         self.current_step = 0
         self.balance = self.initial_balance
         self.portfolio_value = self.initial_balance
         self.positions = np.zeros(self.n_assets)
 
-        return self._get_observation()
+        obs = self._get_observation()
+        info = {}
+
+        return obs, info
 
     def _get_observation(self):
         """Get current observation."""
@@ -155,8 +161,9 @@ class PortfolioEnv(gym.Env):
         else:
             reward = 0
 
-        # Check if done
-        done = self.current_step >= min(self.max_steps, len(self.dates) - 1)
+        # Check if done (Gymnasium uses terminated and truncated)
+        terminated = self.current_step >= len(self.dates) - 1
+        truncated = self.current_step >= self.max_steps
 
         # Get next observation
         obs = self._get_observation()
@@ -167,7 +174,7 @@ class PortfolioEnv(gym.Env):
             'date': date
         }
 
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
 
 class RLPortfolioAgent:
@@ -321,16 +328,53 @@ class RLPortfolioAgent:
         # Create observation
         obs = []
         tickers = sorted(current_features.keys())
+
+        # First pass: determine max feature size
+        feature_sizes = []
         for ticker in tickers:
-            obs.extend(current_features[ticker])
+            features = current_features[ticker]
+            if isinstance(features, (int, float, np.number)):
+                feature_sizes.append(1)
+            else:
+                features_array = np.asarray(features).flatten()
+                feature_sizes.append(len(features_array))
+
+        max_features = max(feature_sizes) if feature_sizes else 0
+
+        # Second pass: pad features to same size
+        for ticker in tickers:
+            features = current_features[ticker]
+            # Handle single value or array
+            if isinstance(features, (int, float, np.number)):
+                features_array = np.array([float(features)])
+            else:
+                # Convert to array and flatten
+                features_array = np.asarray(features).flatten()
+
+            # Pad with zeros if needed to reach max_features
+            if len(features_array) < max_features:
+                padding = np.zeros(max_features - len(features_array))
+                features_array = np.concatenate([features_array, padding])
+
+            obs.extend(features_array)
 
         obs = np.array(obs, dtype=np.float32)
 
         # Predict
         action = self.predict(obs)
 
+        # Ensure action is array (PPO returns tuple, extract action)
+        if isinstance(action, (list, tuple)):
+            action = action[0]
+        action = np.asarray(action).flatten()
+
+        # Ensure action has correct length
+        if len(action) != len(tickers):
+            logger.warning(f"Action size mismatch: got {len(action)}, expected {len(tickers)}. Using equal weights.")
+            action = np.ones(len(tickers))
+
         # Normalize
-        action = np.clip(action[0], 0, 1)
+        action = np.clip(action, 0, 1)
         action = action / (action.sum() + 1e-8)
 
         # Create allocation dict

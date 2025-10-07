@@ -61,7 +61,8 @@ class PortfolioOptimizer:
         self,
         returns: pd.DataFrame,
         method: str = 'max_sharpe',
-        constraints: Optional[Dict] = None
+        constraints: Optional[Dict] = None,
+        ml_predictions: Optional[Dict[str, float]] = None
     ) -> Dict[str, float]:
         """
         Markowitz Mean-Variance Optimization.
@@ -78,37 +79,114 @@ class PortfolioOptimizer:
             logger.error("pypfopt required for Markowitz optimization")
             return {}
 
+        # Handle single asset case
+        if len(returns.columns) == 1:
+            logger.info("Single asset detected, returning 100% allocation")
+            return {returns.columns[0]: 1.0}
+
         logger.info(f"Running Markowitz optimization ({method})")
 
-        # Calculate expected returns and covariance matrix
-        mu = expected_returns.mean_historical_return(returns)
-        S = risk_models.sample_cov(returns)
+        try:
+            # Additional validation: ensure no NaN in returns
+            if returns.isnull().any().any():
+                logger.warning("Returns contain NaN values before Markowitz, cleaning...")
+                nan_cols = returns.columns[returns.isnull().any()].tolist()
+                logger.warning(f"  Columns with NaN: {nan_cols}")
+                for col in nan_cols:
+                    logger.warning(f"  {col}: {returns[col].isnull().sum()}/{len(returns)} NaN values")
+                returns = returns.dropna()
 
-        # Create efficient frontier
-        ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))
+            if returns.empty or len(returns) < 20:
+                raise ValueError(f"Insufficient clean data: {len(returns)} rows")
 
-        # Apply optimization
-        if method == 'max_sharpe':
-            weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
-        elif method == 'min_volatility':
-            weights = ef.min_volatility()
-        elif method == 'efficient_return':
-            if self.target_return is None:
-                logger.warning("target_return not set, using max Sharpe instead")
-                weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
+            # Calculate expected returns - use ML predictions if available
+            if ml_predictions:
+                # Use ML predictions (adjusted by RealityCheck)
+                mu = pd.Series({ticker: ml_predictions.get(ticker, 0)
+                               for ticker in returns.columns})
+                logger.info("Using ML predictions for expected returns")
+
+                # Check if all predictions are negative
+                if (mu <= 0).all():
+                    logger.warning("All ML predictions are negative or zero")
+                    logger.warning("In bearish market conditions, using equal weights as conservative strategy")
+                    tickers = returns.columns
+                    return {ticker: 1.0/len(tickers) for ticker in tickers}
             else:
-                weights = ef.efficient_return(self.target_return)
-        else:
-            raise ValueError(f"Unknown method: {method}")
+                # Fallback to historical mean
+                mu = expected_returns.mean_historical_return(returns)
+                logger.info("Using historical mean for expected returns")
 
-        # Clean weights
-        weights = ef.clean_weights()
+            # Check for NaN in mu and remove problematic tickers
+            if mu.isnull().any():
+                nan_tickers = mu[mu.isnull()].index.tolist()
+                logger.warning(f"NaN in expected returns for: {nan_tickers}")
+                logger.warning(f"Full mu series:\n{mu}")
 
-        # Get performance metrics
-        perf = ef.portfolio_performance(risk_free_rate=self.risk_free_rate)
-        logger.info(f"Expected return: {perf[0]:.4f}, Volatility: {perf[1]:.4f}, Sharpe: {perf[2]:.4f}")
+                # Remove problematic tickers and retry
+                logger.warning(f"Removing {nan_tickers} and retrying...")
+                returns = returns.drop(columns=nan_tickers)
 
-        return weights
+                # Handle single asset case after removal
+                if len(returns.columns) == 1:
+                    logger.info(f"Only one asset remains after removing NaN tickers: {returns.columns[0]}")
+                    return {returns.columns[0]: 1.0}
+
+                if len(returns.columns) == 0:
+                    raise ValueError("All tickers have NaN expected returns")
+
+                # Recalculate mu with remaining tickers
+                mu = expected_returns.mean_historical_return(returns)
+
+                # If still NaN, give up
+                if mu.isnull().any():
+                    raise ValueError("Expected returns still contain NaN after removing problematic tickers")
+
+            # Use Ledoit-Wolf shrinkage for better conditioned covariance matrix
+            # This fixes non-convex errors by ensuring positive semi-definite matrix
+            S = risk_models.CovarianceShrinkage(returns).ledoit_wolf()
+
+            # Check for NaN in covariance
+            if np.isnan(S).any():
+                logger.warning("NaN in covariance matrix")
+                raise ValueError("Covariance matrix contains NaN")
+
+            # Create efficient frontier with regularization
+            ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))
+
+            # Add L2 regularization to improve stability
+            ef.add_objective(objective_functions.L2_reg, gamma=0.1)
+
+            # Apply optimization
+            if method == 'max_sharpe':
+                weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
+            elif method == 'min_volatility':
+                weights = ef.min_volatility()
+            elif method == 'efficient_return':
+                if self.target_return is None:
+                    logger.warning("target_return not set, using max Sharpe instead")
+                    weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
+                else:
+                    weights = ef.efficient_return(self.target_return)
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
+            # Clean weights
+            weights = ef.clean_weights()
+
+            # Get performance metrics
+            perf = ef.portfolio_performance(risk_free_rate=self.risk_free_rate)
+            logger.info(f"Expected return: {perf[0]:.4f}, Volatility: {perf[1]:.4f}, Sharpe: {perf[2]:.4f}")
+
+            return weights
+
+        except Exception as e:
+            logger.warning(f"Markowitz optimization failed: {e}")
+            # Fallback to equal weights
+            tickers = returns.columns
+            equal_weights = {ticker: 1.0/len(tickers) for ticker in tickers}
+            logger.warning("Using equal weights as fallback")
+            return equal_weights
 
     def black_litterman_optimization(
         self,
@@ -133,55 +211,138 @@ class PortfolioOptimizer:
             logger.error("pypfopt required for Black-Litterman")
             return {}
 
+        # Handle single asset case
+        if len(returns.columns) == 1:
+            logger.info("Single asset detected, returning 100% allocation")
+            return {returns.columns[0]: 1.0}
+
         logger.info("Running Black-Litterman optimization")
 
-        # Calculate covariance
-        S = risk_models.sample_cov(returns)
+        try:
+            # Additional validation: ensure no NaN in returns
+            if returns.isnull().any().any():
+                logger.warning("Returns contain NaN values, cleaning...")
+                returns = returns.dropna()
 
-        # Market-cap weights (if provided)
-        if market_caps:
-            total_cap = sum(market_caps.values())
-            market_prior = {k: v/total_cap for k, v in market_caps.items()}
-        else:
-            # Equal weights as prior
-            tickers = returns.columns
-            market_prior = {ticker: 1.0/len(tickers) for ticker in tickers}
+            if returns.empty or len(returns) < 20:
+                raise ValueError(f"Insufficient clean data: {len(returns)} rows")
 
-        # Create Black-Litterman model
-        bl = BlackLittermanModel(S, pi=market_prior, risk_aversion=2.5)
+            # Calculate covariance with Ledoit-Wolf shrinkage
+            S = risk_models.CovarianceShrinkage(returns).ledoit_wolf()
 
-        # Add views if provided
-        if views:
-            view_dict = views
-            bl.bl_returns(view_dict, confidence)
+            # Check for NaN in covariance
+            if np.isnan(S).any():
+                logger.warning("NaN in covariance matrix")
+                raise ValueError("Covariance matrix contains NaN")
 
-        # Get posterior returns
-        ret_bl = bl.bl_returns()
+            # Market-cap weights (if provided)
+            if market_caps:
+                total_cap = sum(market_caps.values())
+                market_prior = {k: v/total_cap for k, v in market_caps.items()}
+            else:
+                # Equal weights as prior
+                tickers = returns.columns
+                market_prior = {ticker: 1.0/len(tickers) for ticker in tickers}
 
-        # Optimize
-        ef = EfficientFrontier(ret_bl, S)
-        weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
-        weights = ef.clean_weights()
+            # Create Black-Litterman model
+            bl = BlackLittermanModel(S, pi=market_prior, risk_aversion=2.5)
 
-        perf = ef.portfolio_performance(risk_free_rate=self.risk_free_rate)
-        logger.info(f"BL - Expected return: {perf[0]:.4f}, Volatility: {perf[1]:.4f}, Sharpe: {perf[2]:.4f}")
+            # Add views if provided
+            if views:
+                # Convert views dict to proper format
+                # views: {'AAPL': 0.15, 'MSFT': 0.10, ...}
+                # Need to create P (picking matrix) and Q (view returns)
+                view_tickers = list(views.keys())
+                n_views = len(view_tickers)
+                n_assets = len(returns.columns)
+                ticker_to_idx = {ticker: i for i, ticker in enumerate(returns.columns)}
 
-        return weights
+                # Create P matrix (picking matrix) - which assets each view refers to
+                P = np.zeros((n_views, n_assets))
+                Q = []  # View returns
 
-    def risk_parity_optimization(self, returns: pd.DataFrame) -> Dict[str, float]:
+                for i, (ticker, view_return) in enumerate(views.items()):
+                    if ticker in ticker_to_idx:
+                        P[i, ticker_to_idx[ticker]] = 1.0
+                        Q.append(view_return)
+
+                Q = np.array(Q)
+
+                # Confidence in views (if not provided, use moderate confidence)
+                if confidence is None:
+                    confidence = [0.5] * n_views  # Moderate confidence
+
+                # Omega (uncertainty in views) - diagonal matrix
+                # Lower confidence = higher uncertainty
+                omega = np.diag([1.0 / c if c > 0 else 1.0 for c in confidence])
+
+                # Add views using proper format
+                bl.bl_returns(P=P, Q=Q, omega=omega)
+
+            # Get posterior returns
+            ret_bl = bl.bl_returns()
+
+            # Optimize with regularization
+            ef = EfficientFrontier(ret_bl, S)
+            ef.add_objective(objective_functions.L2_reg, gamma=0.1)
+            weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
+            weights = ef.clean_weights()
+
+            perf = ef.portfolio_performance(risk_free_rate=self.risk_free_rate)
+            logger.info(f"BL - Expected return: {perf[0]:.4f}, Volatility: {perf[1]:.4f}, Sharpe: {perf[2]:.4f}")
+
+            return weights
+
+        except Exception as e:
+            logger.debug(f"Black-Litterman optimization failed: {e}")
+            # Fallback to Markowitz
+            logger.debug("Falling back to Markowitz optimization")
+            return self.markowitz_optimization(returns, method='max_sharpe')
+
+    def risk_parity_optimization(
+        self,
+        returns: pd.DataFrame,
+        ml_predictions: Optional[Dict[str, float]] = None
+    ) -> Dict[str, float]:
         """
-        Risk Parity optimization (equal risk contribution).
+        Risk Parity optimization with optional ML-aware targets.
 
         Args:
             returns: DataFrame of asset returns
+            ml_predictions: Optional ML predictions for ML-aware risk targets
 
         Returns:
             Dictionary of ticker to weight
         """
-        logger.info("Running Risk Parity optimization")
+        logger.info("Running Risk Parity optimization" +
+                   (" (ML-aware)" if ml_predictions else ""))
 
         cov_matrix = returns.cov().values
         n_assets = len(returns.columns)
+
+        # ML-aware risk targets: adjust based on predictions
+        if ml_predictions:
+            risk_targets = []
+            for ticker in returns.columns:
+                ml_pred = ml_predictions.get(ticker, 0)
+                # If ML predicts negative, reduce target risk contribution
+                if ml_pred < -0.01:  # Strong negative
+                    target = 0.7  # 30% less risk
+                elif ml_pred < 0:  # Slight negative
+                    target = 0.85  # 15% less risk
+                elif ml_pred > 0.02:  # Strong positive
+                    target = 1.2  # 20% more risk (opportunity)
+                else:  # Neutral
+                    target = 1.0
+                risk_targets.append(target)
+
+            # Normalize targets to sum to n_assets
+            risk_targets = np.array(risk_targets)
+            risk_targets = risk_targets * n_assets / risk_targets.sum()
+            logger.info(f"ML-aware risk targets: {dict(zip(returns.columns, risk_targets))}")
+        else:
+            # Equal risk contribution (standard RP)
+            risk_targets = np.ones(n_assets)
 
         def risk_contribution(weights, cov_matrix):
             """Calculate risk contribution of each asset."""
@@ -190,11 +351,12 @@ class PortfolioOptimizer:
             risk_contrib = weights * marginal_contrib / portfolio_vol
             return risk_contrib
 
-        def risk_parity_objective(weights, cov_matrix):
-            """Objective: minimize variance of risk contributions."""
+        def risk_parity_objective(weights, cov_matrix, targets):
+            """Objective: minimize variance from target risk contributions."""
             risk_contrib = risk_contribution(weights, cov_matrix)
-            target = np.ones(len(weights)) / len(weights)
-            return np.sum((risk_contrib - target * np.sum(risk_contrib)) ** 2)
+            # Target risk based on ML-aware targets
+            target_contrib = targets / targets.sum() * np.sum(risk_contrib)
+            return np.sum((risk_contrib - target_contrib) ** 2)
 
         # Constraints
         constraints = [
@@ -209,7 +371,7 @@ class PortfolioOptimizer:
         result = minimize(
             risk_parity_objective,
             init_weights,
-            args=(cov_matrix,),
+            args=(cov_matrix, risk_targets),
             method='SLSQP',
             bounds=bounds,
             constraints=constraints
@@ -355,14 +517,16 @@ class PortfolioOptimizer:
     def get_portfolio_metrics(
         self,
         weights: Dict[str, float],
-        returns: pd.DataFrame
+        returns: pd.DataFrame,
+        ml_predictions: Optional[Dict[str, float]] = None
     ) -> Dict[str, float]:
         """
         Calculate portfolio performance metrics.
 
         Args:
             weights: Portfolio weights
-            returns: Historical returns
+            returns: Historical returns (for volatility/drawdown calculation)
+            ml_predictions: Optional ML predictions for expected return
 
         Returns:
             Dictionary of performance metrics
@@ -370,11 +534,19 @@ class PortfolioOptimizer:
         # Convert weights to array
         weight_array = np.array([weights.get(col, 0) for col in returns.columns])
 
-        # Portfolio returns
+        # Portfolio returns (for risk metrics only)
         portfolio_returns = returns @ weight_array
 
-        # Calculate metrics
-        annual_return = portfolio_returns.mean() * 252
+        # Calculate expected return - use ML predictions if available
+        if ml_predictions:
+            # Use ML predictions for expected return
+            annual_return = sum(weights.get(ticker, 0) * ml_predictions.get(ticker, 0)
+                              for ticker in returns.columns)
+            logger.info(f"Using ML predictions for expected return: {annual_return*100:.2f}%")
+        else:
+            # Fallback to historical mean
+            annual_return = portfolio_returns.mean() * 252
+            logger.info(f"Using historical mean for expected return: {annual_return*100:.2f}%")
         annual_vol = portfolio_returns.std() * np.sqrt(252)
         sharpe = (annual_return - self.risk_free_rate) / annual_vol
 

@@ -175,13 +175,17 @@ source venv/bin/activate
 # Create Python script
 TEMP_SCRIPT=$(mktemp /tmp/predict_XXXXXX.py)
 
-cat > "$TEMP_SCRIPT" << 'PYTHON_SCRIPT'
+# Get project directory
+PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+cat > "$TEMP_SCRIPT" << PYTHON_SCRIPT
 import sys
 import json
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project directory to path
+project_dir = Path("$PROJECT_DIR")
+sys.path.insert(0, str(project_dir))
 
 from src.orchestrator import PortfolioOrchestrator
 

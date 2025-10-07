@@ -42,18 +42,20 @@ class RiskManager:
         self,
         returns: pd.Series,
         confidence: float = 0.95,
-        method: str = 'historical'
+        method: str = 'historical',
+        ml_prediction: Optional[float] = None
     ) -> float:
         """
-        Calculate Value at Risk.
+        Calculate Value at Risk with optional ML adjustment.
 
         Args:
             returns: Historical returns
             confidence: Confidence level
             method: 'historical', 'parametric', or 'monte_carlo'
+            ml_prediction: Optional ML predicted return for adjustment
 
         Returns:
-            VaR value
+            VaR value (adjusted if ML prediction provided)
         """
         if method == 'historical':
             var = returns.quantile(1 - confidence)
@@ -71,25 +73,57 @@ class RiskManager:
         else:
             raise ValueError(f"Unknown method: {method}")
 
+        # ML-adjustment: if ML predicts bearish market, increase VaR (more risk)
+        if ml_prediction is not None:
+            if ml_prediction < -0.01:  # Predicts >1% decline
+                # Bearish: increase risk estimate by 30%
+                adjustment_factor = 1.3
+                logger.info(f"ML predicts bearish ({ml_prediction*100:.2f}%), increasing VaR by 30%")
+            elif ml_prediction < 0:  # Slight negative
+                # Cautious: increase risk by 15%
+                adjustment_factor = 1.15
+                logger.info(f"ML predicts slight negative ({ml_prediction*100:.2f}%), increasing VaR by 15%")
+            elif ml_prediction > 0.02:  # Predicts >2% gain
+                # Bullish: decrease risk estimate by 10%
+                adjustment_factor = 0.9
+                logger.info(f"ML predicts bullish ({ml_prediction*100:.2f}%), decreasing VaR by 10%")
+            else:
+                # Neutral
+                adjustment_factor = 1.0
+
+            var = var * adjustment_factor
+
         return var
 
     def calculate_cvar(
         self,
         returns: pd.Series,
-        confidence: float = 0.95
+        confidence: float = 0.95,
+        ml_prediction: Optional[float] = None
     ) -> float:
         """
-        Calculate Conditional VaR (Expected Shortfall).
+        Calculate Conditional VaR (Expected Shortfall) with optional ML adjustment.
 
         Args:
             returns: Historical returns
             confidence: Confidence level
+            ml_prediction: Optional ML predicted return for adjustment
 
         Returns:
-            CVaR value
+            CVaR value (adjusted if ML prediction provided)
         """
-        var = self.calculate_var(returns, confidence, method='historical')
+        var = self.calculate_var(returns, confidence, method='historical', ml_prediction=ml_prediction)
         cvar = returns[returns <= var].mean()
+
+        # Apply same ML adjustment as VaR
+        if ml_prediction is not None:
+            if ml_prediction < -0.01:
+                cvar = cvar * 1.3
+            elif ml_prediction < 0:
+                cvar = cvar * 1.15
+            elif ml_prediction > 0.02:
+                cvar = cvar * 0.9
+
         return cvar
 
     def calculate_position_size(
@@ -158,18 +192,20 @@ class RiskManager:
         self,
         returns: pd.DataFrame,
         weights: Dict[str, float],
-        confidence: float = 0.95
+        confidence: float = 0.95,
+        ml_predictions: Optional[Dict[str, float]] = None
     ) -> float:
         """
-        Calculate portfolio-level VaR.
+        Calculate portfolio-level VaR with optional ML adjustment.
 
         Args:
             returns: DataFrame of asset returns
             weights: Portfolio weights
             confidence: Confidence level
+            ml_predictions: Optional dict of ML predictions per ticker
 
         Returns:
-            Portfolio VaR
+            Portfolio VaR (ML-adjusted if predictions provided)
         """
         # Weight array
         w = np.array([weights.get(col, 0) for col in returns.columns])
@@ -177,8 +213,14 @@ class RiskManager:
         # Portfolio returns
         portfolio_returns = (returns * w).sum(axis=1)
 
-        # Calculate VaR
-        var = self.calculate_var(portfolio_returns, confidence)
+        # Calculate weighted average ML prediction for portfolio
+        ml_pred_portfolio = None
+        if ml_predictions:
+            ml_pred_portfolio = sum(weights.get(ticker, 0) * ml_predictions.get(ticker, 0)
+                                   for ticker in returns.columns)
+
+        # Calculate VaR with ML adjustment
+        var = self.calculate_var(portfolio_returns, confidence, ml_prediction=ml_pred_portfolio)
 
         return var
 
@@ -186,12 +228,31 @@ class RiskManager:
         self,
         returns: pd.DataFrame,
         weights: Dict[str, float],
-        confidence: float = 0.95
+        confidence: float = 0.95,
+        ml_predictions: Optional[Dict[str, float]] = None
     ) -> float:
-        """Calculate portfolio CVaR."""
+        """
+        Calculate portfolio CVaR with optional ML adjustment.
+
+        Args:
+            returns: DataFrame of asset returns
+            weights: Portfolio weights
+            confidence: Confidence level
+            ml_predictions: Optional dict of ML predictions per ticker
+
+        Returns:
+            Portfolio CVaR (ML-adjusted if predictions provided)
+        """
         w = np.array([weights.get(col, 0) for col in returns.columns])
         portfolio_returns = (returns * w).sum(axis=1)
-        cvar = self.calculate_cvar(portfolio_returns, confidence)
+
+        # Calculate weighted average ML prediction for portfolio
+        ml_pred_portfolio = None
+        if ml_predictions:
+            ml_pred_portfolio = sum(weights.get(ticker, 0) * ml_predictions.get(ticker, 0)
+                                   for ticker in returns.columns)
+
+        cvar = self.calculate_cvar(portfolio_returns, confidence, ml_prediction=ml_pred_portfolio)
         return cvar
 
     def calculate_stress_scenarios(

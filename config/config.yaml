@@ -20,6 +20,18 @@ data:
     api_key: "f0f32e5766d9458590ee7cb109d189d2"  # Get at https://newsapi.org/
     sources: ["bloomberg", "reuters", "financial-times"]
 
+  # Financial Modeling Prep (FMP) - Fundamental data
+  fmp:
+    enabled: false  # DISABLED - API key is legacy, all endpoints require new paid subscription
+    api_key: ""  # Get new key at https://financialmodelingprep.com/developer/docs/ (requires payment)
+    # NOTE: FMP changed their pricing model - all endpoints are now paid only
+
+  # Finnhub - Real-time data
+  finnhub:
+    enabled: true
+    api_key: "d3iclf1r01qn6oio1n4gd3iclf1r01qn6oio1n50"  # Get free key at https://finnhub.io/register
+    # Free tier: 60 calls/minute
+
 # Portfolio Settings
 portfolio:
   initial_budget: 10000  # Initial capital in USD
@@ -79,15 +91,28 @@ models:
     batch_size: 32
     learning_rate: 0.001
 
+  # LSTM with Attention settings
+  lstm_attention:
+    enabled: true
+    sequence_length: 60
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+
   # Transformer settings
   transformer:
     enabled: true
     d_model: 128
     nhead: 8
     num_layers: 4
+    dim_feedforward: 512
     dropout: 0.1
     epochs: 100
     batch_size: 32
+    learning_rate: 0.001
 
   # XGBoost settings
   xgboost:
@@ -106,13 +131,17 @@ models:
     learning_rate: 0.05
     num_leaves: 31
 
-  # Ensemble weights (auto-adjusted based on performance)
+  # Ensemble weights based on 2024-2025 research
+  # Research shows: XGB+LGB+CatBoost very effective, LSTM-XGB best performance
   ensemble:
-    lstm_weight: 0.25
-    gru_weight: 0.20
-    transformer_weight: 0.15
-    xgboost_weight: 0.25
-    lightgbm_weight: 0.15
+    use_advanced_models: true  # Use Transformer and LSTM+Attention
+    xgboost_weight: 0.25         # HIGH - Research: LSTM-XGB best with arithmetic mean
+    lightgbm_weight: 0.25        # HIGH - Research: TCN-LSTM-LGB reduced error 4.88%
+    catboost_weight: 0.10        # MODERATE - Research: gradient boosting trio effective
+    lstm_weight: 0.15            # MODERATE - Research: good for time series
+    gru_weight: 0.05             # LOW - Similar to LSTM but less effective
+    lstm_attention_weight: 0.10  # MODERATE - Better for volatility periods
+    transformer_weight: 0.10     # MODERATE - Good for long patterns but complex
 
 # Portfolio Optimization
 optimization:
@@ -121,25 +150,26 @@ optimization:
   risk_profile: "medium"  # low, medium, high
 
   # Risk profile weights for each method (all methods are used together)
+  # Weights based on 2024-2025 research: BL+CVaR outperforms, RL needs careful tuning
   risk_profiles:
     low:
-      mean_variance: 0.10      # Conservative Markowitz
-      black_litterman: 0.20    # Incorporates market views
-      risk_parity: 0.35        # Equal risk distribution
-      cvar: 0.20               # Minimize tail risk
-      rl_agent: 0.15           # RL-based dynamic allocation
+      mean_variance: 0.15      # Conservative Markowitz
+      black_litterman: 0.30    # Strong market views (research: BL+CVaR best for tail risk)
+      risk_parity: 0.30        # High diversification (research: good in uncertain markets)
+      cvar: 0.20               # High tail risk control (research: critical for downside)
+      rl_agent: 0.05           # Low RL (research: PPO with basic config underperforms)
     medium:
-      mean_variance: 0.30      # Balanced Markowitz
-      black_litterman: 0.25    # Market views + sentiment
-      risk_parity: 0.15        # Some risk diversification
-      cvar: 0.10               # Moderate tail risk control
-      rl_agent: 0.20           # RL-based dynamic allocation
+      mean_variance: 0.35      # +10% Balanced returns (research: highest Sharpe in studies)
+      black_litterman: 0.35    # +5% Strong views integration (research: BL+LSTM outperforms)
+      risk_parity: 0.15        # -5% Moderate diversification
+      cvar: 0.10               # -5% Moderate tail risk (research: BL+CVaR combination effective)
+      rl_agent: 0.05           # -5% Low-moderate RL (research: needs CNN features for good performance)
     high:
-      mean_variance: 0.45      # Aggressive max Sharpe
-      black_litterman: 0.25    # Leverage market views
-      risk_parity: 0.05        # Less diversification
-      cvar: 0.05               # Minimal tail risk focus
-      rl_agent: 0.20           # RL-based dynamic allocation
+      mean_variance: 0.40      # Aggressive max Sharpe (research: best Sharpe ratio 15%+)
+      black_litterman: 0.25    # Leverage views with ML
+      risk_parity: 0.10        # Less diversification (accept concentration)
+      cvar: 0.10               # Moderate tail risk (some downside protection)
+      rl_agent: 0.15           # Moderate RL (research: can be 1.85x better with good config)
 
   # Markowitz settings
   mean_variance:
@@ -158,6 +188,32 @@ optimization:
     training_episodes: 1000
     learning_rate: 0.0003
     gamma: 0.99
+
+  # Dynamic Weight Calibration (NEW!)
+  # Adjusts weights per ticker based on ML predictions and method effectiveness
+  # Now ML-aware: Favors ML-driven methods (Markowitz, BL) when ML predictions available
+  dynamic_weights:
+    enabled: true  # Re-enabled with ML-aware scoring
+    lookback_period: 60  # Days to use for historical calibration
+    # When enabled, the system will:
+    # 1. Test each ML model on validation data per ticker
+    # 2. Weight models higher if they perform better for that specific ticker
+    # 3. Adjust portfolio optimization weights based on method effectiveness
+    # This makes the system adaptive to each stock's unique characteristics
+
+  # Reality Check System (NEW!)
+  # Applies conservative adjustments to prevent overly optimistic predictions
+  reality_check:
+    enabled: true  # Enable reality checks
+    degradation_factor: 0.7  # Out-of-sample performance (70% of in-sample)
+    slippage_factor: 0.0005  # 0.05% slippage per trade
+    # Adjustments applied:
+    # 1. Out-of-sample degradation (models perform worse on new data)
+    # 2. Overfitting penalties (complex models discounted)
+    # 3. Extreme prediction caps (predictions > 2x volatility reduced)
+    # 4. Transaction costs and slippage
+    # 5. Market impact for large orders
+    # This ensures predictions are realistic and achievable
 
 # Backtesting
 backtesting:

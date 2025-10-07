@@ -44,6 +44,26 @@ class StockDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+class AttentionLayer(nn.Module):
+    """Attention mechanism for LSTM."""
+
+    def __init__(self, hidden_size: int):
+        super(AttentionLayer, self).__init__()
+        self.hidden_size = hidden_size
+        self.attention = nn.Linear(hidden_size, 1)
+
+    def forward(self, lstm_output):
+        # lstm_output shape: (batch, seq_len, hidden_size)
+        attention_weights = torch.softmax(self.attention(lstm_output), dim=1)
+        # attention_weights shape: (batch, seq_len, 1)
+
+        # Weighted sum
+        context_vector = torch.sum(attention_weights * lstm_output, dim=1)
+        # context_vector shape: (batch, hidden_size)
+
+        return context_vector, attention_weights
+
+
 class LSTMModel(nn.Module):
     """LSTM model for stock prediction."""
 
@@ -359,7 +379,12 @@ class LSTMTrainer:
             for (X_batch,) in loader:
                 X_batch = X_batch.to(self.device)
                 outputs = self.model(X_batch).squeeze()
-                predictions.extend(outputs.cpu().numpy())
+                # Handle both single prediction and batch
+                outputs_np = outputs.cpu().numpy()
+                if outputs_np.ndim == 0:  # Scalar
+                    predictions.append(float(outputs_np))
+                else:  # Array
+                    predictions.extend(outputs_np.tolist())
 
         return np.array(predictions)
 
@@ -405,3 +430,65 @@ class LSTMTrainer:
             'trainable_parameters': trainable_params,
             'device': str(self.device)
         }
+
+
+class LSTMAttentionModel(nn.Module):
+    """LSTM model with Attention mechanism for enhanced prediction."""
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+        output_size: int = 1
+    ):
+        """
+        Initialize LSTM with Attention.
+
+        Args:
+            input_size: Number of input features
+            hidden_size: LSTM hidden size
+            num_layers: Number of LSTM layers
+            dropout: Dropout rate
+            output_size: Output dimension
+        """
+        super(LSTMAttentionModel, self).__init__()
+
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # LSTM layer
+        self.lstm = nn.LSTM(
+            input_size,
+            hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0
+        )
+
+        # Attention layer
+        self.attention = AttentionLayer(hidden_size)
+
+        # Output layers
+        self.fc1 = nn.Linear(hidden_size, 64)
+        self.fc2 = nn.Linear(64, output_size)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """Forward pass with attention."""
+        # LSTM
+        lstm_out, _ = self.lstm(x)
+        # lstm_out shape: (batch, seq_len, hidden_size)
+
+        # Apply attention
+        context_vector, attention_weights = self.attention(lstm_out)
+        # context_vector shape: (batch, hidden_size)
+
+        # Fully connected layers
+        out = self.relu(self.fc1(context_vector))
+        out = self.dropout(out)
+        out = self.fc2(out)
+
+        return out, attention_weights

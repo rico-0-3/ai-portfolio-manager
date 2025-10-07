@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import logging
 from datetime import datetime
 
@@ -16,13 +16,18 @@ from src.utils.logger import setup_logger
 from src.data.market_data import MarketDataFetcher
 from src.data.sentiment_data import SentimentDataFetcher
 from src.data.sentiment_analyzer import HybridSentimentAnalyzer
+from src.data.fmp_data import FMPDataFetcher
+from src.data.finnhub_data import FinnhubDataFetcher
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.feature_engineering import FeatureEngineer
-from src.models.lstm_model import LSTMTrainer
+from src.models.lstm_model import LSTMTrainer, LSTMAttentionModel, TORCH_AVAILABLE
 from src.models.ensemble_models import EnsemblePredictor, XGBoostPredictor, LightGBMPredictor
+from src.models.transformer_model import TransformerTrainer
 from src.models.rl_agent import RLPortfolioAgent, PortfolioEnv
 from src.portfolio.optimizer import PortfolioOptimizer
 from src.portfolio.risk_manager import RiskManager
+from src.dynamic_weights import DynamicWeightCalibrator
+from src.reality_check import RealityCheck
 
 
 class PortfolioOrchestrator:
@@ -53,6 +58,16 @@ class PortfolioOrchestrator:
         self.sentiment_fetcher = SentimentDataFetcher(
             news_api_key=self.config.get('data.news_api.api_key')
         )
+
+        # Initialize additional data sources
+        fmp_enabled = self.config.get('data.fmp.enabled', False)
+        fmp_key = self.config.get('data.fmp.api_key')
+        self.fmp_fetcher = FMPDataFetcher(api_key=fmp_key) if fmp_enabled and fmp_key else None
+
+        finnhub_enabled = self.config.get('data.finnhub.enabled', False)
+        finnhub_key = self.config.get('data.finnhub.api_key')
+        self.finnhub_fetcher = FinnhubDataFetcher(api_key=finnhub_key) if finnhub_enabled and finnhub_key else None
+
         self.tech_indicators = TechnicalIndicators()
         self.feature_engineer = FeatureEngineer()
         self.optimizer = PortfolioOptimizer(
@@ -63,7 +78,20 @@ class PortfolioOrchestrator:
             max_drawdown=self.config.get('risk.max_drawdown', 0.25)
         )
 
-        self.logger.info("PortfolioOrchestrator initialized")
+        # Dynamic weight calibrator (NEW!)
+        use_dynamic_weights = self.config.get('optimization.dynamic_weights.enabled', True)
+        lookback_period = self.config.get('optimization.dynamic_weights.lookback_period', 60)
+        self.dynamic_calibrator = DynamicWeightCalibrator(lookback_period=lookback_period) if use_dynamic_weights else None
+
+        # Reality check system (NEW!)
+        use_reality_check = self.config.get('optimization.reality_check.enabled', True)
+        self.reality_check = RealityCheck(
+            degradation_factor=self.config.get('optimization.reality_check.degradation_factor', 0.7),
+            min_transaction_cost=self.config.get('portfolio.transaction_cost', 0.001),
+            slippage_factor=self.config.get('optimization.reality_check.slippage_factor', 0.0005)
+        ) if use_reality_check else None
+
+        self.logger.info(f"PortfolioOrchestrator initialized (FMP: {fmp_enabled}, Finnhub: {finnhub_enabled}, DynamicWeights: {use_dynamic_weights}, RealityCheck: {use_reality_check})")
 
     def run_full_pipeline(
         self,
@@ -99,31 +127,35 @@ class PortfolioOrchestrator:
         self.logger.info(f"Fetched data for {len(market_data)} tickers")
 
         # Step 2: Fetch sentiment data
-        self.logger.info("\n[2/6] Analyzing sentiment...")
+        self.logger.info("\n[2/7] Analyzing sentiment...")
         sentiment_scores = self._analyze_sentiment(tickers)
 
-        # Step 3: Feature engineering
-        self.logger.info("\n[3/6] Engineering features...")
-        processed_data = self._engineer_features(market_data)
+        # Step 3: Enrich with fundamental and analyst data
+        self.logger.info("\n[3/7] Enriching with additional data...")
+        fundamental_data, analyst_data = self._enrich_data(tickers)
 
-        # Step 4: ML predictions (optional)
+        # Step 4: Feature engineering
+        self.logger.info("\n[4/7] Engineering features...")
+        processed_data = self._engineer_features(market_data, fundamental_data, analyst_data)
+
+        # Step 5: ML predictions (optional)
         predictions = {}
         if use_ml_predictions:
-            self.logger.info("\n[4/6] Generating ML predictions...")
-            predictions = self._generate_predictions(processed_data)
+            self.logger.info("\n[5/7] Generating ML predictions...")
+            predictions = self._generate_predictions(processed_data, analyst_data)
         else:
-            self.logger.info("\n[4/6] Skipping ML predictions")
+            self.logger.info("\n[5/7] Skipping ML predictions")
 
-        # Step 5: Portfolio optimization (uses ALL methods)
-        self.logger.info("\n[5/6] Optimizing portfolio...")
+        # Step 6: Portfolio optimization (uses ALL methods)
+        self.logger.info("\n[6/7] Optimizing portfolio...")
         weights = self._optimize_portfolio(
             processed_data,
             sentiment_scores,
             predictions
         )
 
-        # Step 6: Risk management and allocation
-        self.logger.info("\n[6/6] Applying risk management...")
+        # Step 7: Risk management and allocation
+        self.logger.info("\n[7/7] Applying risk management...")
         final_weights = self.risk_manager.check_position_limits(weights)
 
         # Get latest prices for allocation
@@ -147,19 +179,78 @@ class PortfolioOrchestrator:
             for ticker, data in processed_data.items()
         }).dropna()
 
-        # Calculate portfolio metrics
-        metrics = self.optimizer.get_portfolio_metrics(final_weights, returns_df)
+        # Calculate portfolio metrics using ML predictions
+        metrics = self.optimizer.get_portfolio_metrics(final_weights, returns_df, ml_predictions=predictions)
 
-        # Calculate risk metrics
+        # Apply RealityCheck to portfolio returns
+        if self.reality_check:
+            self.logger.info("Applying RealityCheck to portfolio metrics...")
+
+            # Calculate transaction costs
+            rebalance_freq = self.config.get('portfolio.rebalance_frequency', 'weekly')
+            adjusted_return = self.reality_check.apply_transaction_costs(
+                expected_return=metrics['annual_return'],
+                portfolio_value=budget,
+                weights=final_weights,
+                prices=latest_prices,
+                rebalance_frequency=rebalance_freq
+            )
+
+            # Validate Sharpe ratio
+            n_observations = len(returns_df)
+            n_parameters = len(final_weights) * 2  # Rough estimate
+            adjusted_sharpe, sharpe_warning = self.reality_check.validate_sharpe_ratio(
+                sharpe=metrics['sharpe_ratio'],
+                n_observations=n_observations,
+                n_parameters=n_parameters
+            )
+
+            # Calculate realistic confidence
+            model_agreement = 0.85  # Assume 85% agreement between models
+            confidence_pct, confidence_level = self.reality_check.calculate_realistic_confidence(
+                sharpe=adjusted_sharpe,
+                volatility=metrics['annual_volatility'],
+                n_observations=n_observations,
+                model_agreement=model_agreement
+            )
+
+            # Detect negative scenarios
+            negative_analysis = self.reality_check.detect_negative_scenarios(
+                returns=returns_df,
+                weights=final_weights
+            )
+
+            # Stress test
+            stress_results = self.reality_check.stress_test_portfolio(
+                returns=returns_df,
+                weights=final_weights
+            )
+
+            # Update metrics with adjusted values
+            metrics['annual_return'] = adjusted_return
+            metrics['sharpe_ratio'] = adjusted_sharpe
+            metrics['reality_check'] = {
+                'confidence_pct': confidence_pct,
+                'confidence_level': confidence_level,
+                'sharpe_warning': sharpe_warning,
+                'negative_analysis': negative_analysis,
+                'stress_test': stress_results
+            }
+
+            self.logger.info("RealityCheck applied to portfolio metrics")
+
+        # Calculate risk metrics with ML adjustment
         portfolio_var = self.risk_manager.calculate_portfolio_var(
             returns_df,
             final_weights,
-            confidence=self.config.get('risk.var_confidence', 0.95)
+            confidence=self.config.get('risk.var_confidence', 0.95),
+            ml_predictions=predictions  # Pass ML predictions for adjustment
         )
         portfolio_cvar = self.risk_manager.calculate_portfolio_cvar(
             returns_df,
             final_weights,
-            confidence=self.config.get('risk.var_confidence', 0.95)
+            confidence=self.config.get('risk.var_confidence', 0.95),
+            ml_predictions=predictions  # Pass ML predictions for adjustment
         )
 
         results = {
@@ -210,8 +301,43 @@ class PortfolioOrchestrator:
 
         return sentiment_scores
 
-    def _engineer_features(self, market_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-        """Engineer features for all tickers."""
+    def _enrich_data(self, tickers: List[str]) -> Tuple[Dict, Dict]:
+        """
+        Enrich with fundamental and analyst data.
+
+        Returns:
+            Tuple of (fundamental_data, analyst_data)
+        """
+        fundamental_data = {}
+        analyst_data = {}
+
+        # Get fundamental data from FMP
+        if self.fmp_fetcher:
+            try:
+                self.logger.info("Fetching fundamental data from FMP...")
+                fundamental_data = self.fmp_fetcher.enrich_with_fundamentals(tickers)
+                self.logger.info(f"Fundamental data fetched for {len(fundamental_data)} tickers")
+            except Exception as e:
+                self.logger.error(f"FMP data fetch error: {e}")
+
+        # Get analyst data from Finnhub
+        if self.finnhub_fetcher:
+            try:
+                self.logger.info("Fetching analyst data from Finnhub...")
+                analyst_data = self.finnhub_fetcher.enrich_with_analyst_data(tickers)
+                self.logger.info(f"Analyst data fetched for {len(analyst_data)} tickers")
+            except Exception as e:
+                self.logger.error(f"Finnhub data fetch error: {e}")
+
+        return fundamental_data, analyst_data
+
+    def _engineer_features(
+        self,
+        market_data: Dict[str, pd.DataFrame],
+        fundamental_data: Optional[Dict] = None,
+        analyst_data: Optional[Dict] = None
+    ) -> Dict[str, pd.DataFrame]:
+        """Engineer features for all tickers, including fundamental and analyst data."""
         processed_data = {}
 
         for ticker, df in market_data.items():
@@ -224,28 +350,66 @@ class PortfolioOrchestrator:
                 df = self.feature_engineer.create_volume_features(df)
                 df = self.feature_engineer.create_volatility_features(df)
 
+                # Add fundamental data as constant features (same value for all rows)
+                fund_count = 0
+                if fundamental_data and ticker in fundamental_data:
+                    fund_features = fundamental_data[ticker]
+                    for key, value in fund_features.items():
+                        if isinstance(value, (int, float)) and not np.isnan(value):
+                            df[f'fund_{key}'] = value
+                            fund_count += 1
+
+                # Add analyst data as constant features
+                analyst_count = 0
+                if analyst_data and ticker in analyst_data:
+                    analyst_features = analyst_data[ticker]
+                    for key, value in analyst_features.items():
+                        if isinstance(value, (int, float)) and not np.isnan(value):
+                            df[f'analyst_{key}'] = value
+                            analyst_count += 1
+
                 # Drop NaN
                 df = df.dropna()
 
                 processed_data[ticker] = df
-                self.logger.info(f"{ticker}: {len(df)} rows, {len(df.columns)} features")
+                features_msg = f"{ticker}: {len(df)} rows, {len(df.columns)} features"
+                if fund_count > 0 or analyst_count > 0:
+                    features_msg += f" (technical: {len(df.columns) - fund_count - analyst_count}, fundamental: {fund_count}, analyst: {analyst_count})"
+                self.logger.info(features_msg)
 
             except Exception as e:
                 self.logger.error(f"Feature engineering error for {ticker}: {e}")
 
         return processed_data
 
-    def _generate_predictions(self, processed_data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
-        """Generate ML predictions using LSTM and Ensemble models."""
+    def _generate_predictions(
+        self,
+        processed_data: Dict[str, pd.DataFrame],
+        analyst_data: Optional[Dict] = None
+    ) -> Dict[str, float]:
+        """Generate ML predictions using enhanced 7-model ensemble."""
         predictions = {}
 
         try:
-            # Initialize ensemble predictor (XGBoost + LightGBM)
-            ensemble = EnsemblePredictor()
+            # Get ensemble configuration
+            use_advanced = self.config.get('models.ensemble.use_advanced_models', True)
+            lstm_weight = self.config.get('models.ensemble.lstm_weight', 0.10)
+            gru_weight = self.config.get('models.ensemble.gru_weight', 0.10)
+            lstm_attn_weight = self.config.get('models.ensemble.lstm_attention_weight', 0.20)
+            transformer_weight = self.config.get('models.ensemble.transformer_weight', 0.20)
+            xgb_weight = self.config.get('models.ensemble.xgboost_weight', 0.20)
+            lgb_weight = self.config.get('models.ensemble.lightgbm_weight', 0.20)
+
+            # Log configuration
+            self.logger.info(f"ML Ensemble Config: use_advanced={use_advanced}, TORCH_AVAILABLE={TORCH_AVAILABLE}")
+            if use_advanced and TORCH_AVAILABLE:
+                self.logger.info(f"Advanced models enabled: LSTM({lstm_weight}), GRU({gru_weight}), LSTM+Attn({lstm_attn_weight}), Transformer({transformer_weight})")
+            else:
+                self.logger.info(f"Using only gradient boosting models: XGBoost({xgb_weight}), LightGBM({lgb_weight})")
 
             for ticker, df in processed_data.items():
                 try:
-                    # Prepare features (use last 60 days for LSTM lookback)
+                    # Prepare features
                     if len(df) < 100:
                         self.logger.warning(f"{ticker}: Insufficient data ({len(df)} rows), skipping")
                         predictions[ticker] = 0.0
@@ -259,6 +423,13 @@ class PortfolioOrchestrator:
                         predictions[ticker] = 0.0
                         continue
 
+                    # Count feature types
+                    fund_features = [c for c in feature_cols if c.startswith('fund_')]
+                    analyst_features = [c for c in feature_cols if c.startswith('analyst_')]
+                    tech_features = [c for c in feature_cols if not c.startswith('fund_') and not c.startswith('analyst_')]
+
+                    self.logger.info(f"{ticker}: Using {len(feature_cols)} features for ML (tech: {len(tech_features)}, fund: {len(fund_features)}, analyst: {len(analyst_features)})")
+
                     X = df[feature_cols].values
                     y = df['Close'].pct_change().shift(-1).fillna(0).values  # Next day return
 
@@ -267,18 +438,264 @@ class PortfolioOrchestrator:
                     X_train, y_train = X[:split_idx], y[:split_idx]
                     X_test = X[-1].reshape(1, -1)  # Last observation
 
-                    # Quick train ensemble (XGBoost + LightGBM)
-                    ensemble.train(X_train, y_train)
-                    pred = ensemble.predict(X_test)[0]
+                    ensemble_predictions = []
+                    default_weights = []
+                    trained_models = {}  # For dynamic weight calibration
 
-                    predictions[ticker] = float(pred)
-                    self.logger.info(f"{ticker}: Predicted return = {pred*100:+.2f}%")
+                    # Split for validation (if DynamicWeights enabled)
+                    if self.dynamic_calibrator:
+                        # Use 80% for train, 20% for validation
+                        val_split = int(len(X_train) * 0.8)
+                        X_train_sub = X_train[:val_split]
+                        y_train_sub = y_train[:val_split]
+                        X_val = X_train[val_split:]
+                        y_val = y_train[val_split:]
+                    else:
+                        X_train_sub = X_train
+                        y_train_sub = y_train
+                        X_val = None
+                        y_val = None
+
+                    # 1. XGBoost
+                    try:
+                        self.logger.debug(f"{ticker}: Training XGBoost...")
+                        xgb_model = XGBoostPredictor()
+                        xgb_model.train(X_train_sub, y_train_sub)
+                        xgb_pred = xgb_model.predict(X_test)[0]
+                        ensemble_predictions.append(xgb_pred)
+                        default_weights.append(xgb_weight)
+                        trained_models['xgboost'] = xgb_model
+                        self.logger.debug(f"{ticker}: XGBoost prediction = {xgb_pred*100:+.2f}%")
+                    except Exception as e:
+                        self.logger.warning(f"{ticker}: XGBoost failed - {e}")
+
+                    # 2. LightGBM
+                    try:
+                        self.logger.debug(f"{ticker}: Training LightGBM...")
+                        lgb_model = LightGBMPredictor()
+                        lgb_model.train(X_train_sub, y_train_sub)
+                        lgb_pred = lgb_model.predict(X_test)[0]
+                        ensemble_predictions.append(lgb_pred)
+                        default_weights.append(lgb_weight)
+                        trained_models['lightgbm'] = lgb_model
+                        self.logger.debug(f"{ticker}: LightGBM prediction = {lgb_pred*100:+.2f}%")
+                    except Exception as e:
+                        self.logger.warning(f"{ticker}: LightGBM failed - {e}")
+
+                    # 3. CatBoost (if enabled)
+                    catboost_enabled = self.config.get('models.catboost.enabled', False)
+                    if catboost_enabled:
+                        try:
+                            from src.models.ensemble_models import CatBoostPredictor
+                            catboost_weight = self.config.get('models.ensemble.catboost_weight', 0.10)
+                            cat_model = CatBoostPredictor()
+                            cat_model.train(X_train_sub, y_train_sub, verbose=False)
+                            cat_pred = cat_model.predict(X_test)[0]
+                            ensemble_predictions.append(cat_pred)
+                            default_weights.append(catboost_weight)
+                            trained_models['catboost'] = cat_model
+                        except Exception as e:
+                            self.logger.warning(f"{ticker}: CatBoost failed - {e}")
+
+                    # Advanced models (if enabled and PyTorch available)
+                    if use_advanced and TORCH_AVAILABLE:
+                        sequence_length = self.config.get('models.lstm.sequence_length', 60)
+
+                        # Prepare sequence data
+                        if len(X_train_sub) >= sequence_length:
+                            # Create sequences from training subset
+                            X_seq_train = []
+                            y_seq_train = []
+                            for i in range(sequence_length, len(X_train_sub)):
+                                X_seq_train.append(X_train_sub[i-sequence_length:i])
+                                y_seq_train.append(y_train_sub[i])
+                            X_seq_train = np.array(X_seq_train)
+                            y_seq_train = np.array(y_seq_train)
+
+                            # Last sequence for prediction
+                            X_seq_test = X[-sequence_length:].reshape(1, sequence_length, -1)
+
+                            # 4. LSTM
+                            try:
+                                lstm_trainer = LSTMTrainer(
+                                    model_type='lstm',
+                                    input_size=X.shape[1],
+                                    hidden_sizes=self.config.get('models.lstm.hidden_units', [128, 64, 32]),
+                                    dropout=self.config.get('models.lstm.dropout', 0.2),
+                                    learning_rate=self.config.get('models.lstm.learning_rate', 0.001)
+                                )
+                                lstm_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)  # Quick train
+                                lstm_pred_raw = lstm_trainer.predict(X_seq_test)
+                                # Handle both scalar and array returns
+                                lstm_pred = float(lstm_pred_raw[0]) if hasattr(lstm_pred_raw, '__len__') else float(lstm_pred_raw)
+                                ensemble_predictions.append(lstm_pred)
+                                default_weights.append(lstm_weight)
+                                trained_models['lstm'] = lstm_trainer
+                                self.logger.debug(f"{ticker}: LSTM prediction = {lstm_pred*100:+.2f}%")
+                            except Exception as e:
+                                self.logger.warning(f"{ticker}: LSTM failed - {e}")
+
+                            # 5. GRU
+                            try:
+                                gru_trainer = LSTMTrainer(
+                                    model_type='gru',
+                                    input_size=X.shape[1],
+                                    hidden_sizes=self.config.get('models.gru.hidden_units', [100, 50]),
+                                    dropout=self.config.get('models.gru.dropout', 0.2),
+                                    learning_rate=self.config.get('models.gru.learning_rate', 0.001)
+                                )
+                                gru_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)
+                                gru_pred_raw = gru_trainer.predict(X_seq_test)
+                                gru_pred = float(gru_pred_raw[0]) if hasattr(gru_pred_raw, '__len__') else float(gru_pred_raw)
+                                ensemble_predictions.append(gru_pred)
+                                default_weights.append(gru_weight)
+                                trained_models['gru'] = gru_trainer
+                                self.logger.debug(f"{ticker}: GRU prediction = {gru_pred*100:+.2f}%")
+                            except Exception as e:
+                                self.logger.warning(f"{ticker}: GRU failed - {e}")
+
+                            # 6. LSTM with Attention
+                            try:
+                                lstm_attn_trainer = TransformerTrainer(
+                                    model_type='lstm_attention',
+                                    input_dim=X.shape[1],
+                                    d_model=self.config.get('models.lstm_attention.hidden_size', 128),
+                                    nhead=1,  # Not used for LSTM attention
+                                    num_layers=self.config.get('models.lstm_attention.num_layers', 2),
+                                    dropout=self.config.get('models.lstm_attention.dropout', 0.2),
+                                    learning_rate=self.config.get('models.lstm_attention.learning_rate', 0.001)
+                                )
+                                lstm_attn_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)
+                                lstm_attn_pred_raw = lstm_attn_trainer.predict(X_seq_test)
+                                lstm_attn_pred = float(lstm_attn_pred_raw[0]) if hasattr(lstm_attn_pred_raw, '__len__') else float(lstm_attn_pred_raw)
+                                ensemble_predictions.append(lstm_attn_pred)
+                                default_weights.append(lstm_attn_weight)
+                                trained_models['lstm_attention'] = lstm_attn_trainer
+                                self.logger.debug(f"{ticker}: LSTM+Attention prediction = {lstm_attn_pred*100:+.2f}%")
+                            except Exception as e:
+                                self.logger.warning(f"{ticker}: LSTM+Attention failed - {e}")
+
+                            # 7. Transformer
+                            try:
+                                self.logger.debug(f"{ticker}: Training Transformer...")
+                                transformer_trainer = TransformerTrainer(
+                                    model_type='transformer',
+                                    input_dim=X.shape[1],
+                                    d_model=self.config.get('models.transformer.d_model', 128),
+                                    nhead=self.config.get('models.transformer.nhead', 8),
+                                    num_layers=self.config.get('models.transformer.num_layers', 4),
+                                    dim_feedforward=self.config.get('models.transformer.dim_feedforward', 512),
+                                    dropout=self.config.get('models.transformer.dropout', 0.1),
+                                    learning_rate=self.config.get('models.transformer.learning_rate', 0.001)
+                                )
+                                transformer_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)
+                                transformer_pred_raw = transformer_trainer.predict(X_seq_test)
+                                transformer_pred = float(transformer_pred_raw[0]) if hasattr(transformer_pred_raw, '__len__') else float(transformer_pred_raw)
+                                ensemble_predictions.append(transformer_pred)
+                                default_weights.append(transformer_weight)
+                                trained_models['transformer'] = transformer_trainer
+                                self.logger.debug(f"{ticker}: Transformer prediction = {transformer_pred*100:+.2f}%")
+                            except Exception as e:
+                                self.logger.warning(f"{ticker}: Transformer failed - {e}")
+                                import traceback
+                                self.logger.debug(f"Transformer traceback: {traceback.format_exc()}")
+
+                    # Combine predictions with weights
+                    if ensemble_predictions:
+                        # Use DynamicWeights if enabled and we have validation data
+                        if self.dynamic_calibrator and X_val is not None and len(X_val) > 10:
+                            # Convert default weights list to dict
+                            default_weight_dict = {
+                                'xgboost': xgb_weight if 'xgboost' in trained_models else 0,
+                                'lightgbm': lgb_weight if 'lightgbm' in trained_models else 0,
+                                'catboost': self.config.get('models.ensemble.catboost_weight', 0.10) if 'catboost' in trained_models else 0,
+                                'lstm': lstm_weight if 'lstm' in trained_models else 0,
+                                'gru': gru_weight if 'gru' in trained_models else 0,
+                                'lstm_attention': lstm_attn_weight if 'lstm_attention' in trained_models else 0,
+                                'transformer': transformer_weight if 'transformer' in trained_models else 0
+                            }
+
+                            # Calibrate weights for this ticker
+                            try:
+                                calibrated_weights = self.dynamic_calibrator.calibrate_ml_weights(
+                                    ticker=ticker,
+                                    X_train=X_train_sub,
+                                    y_train=y_train_sub,
+                                    X_val=X_val,
+                                    y_val=y_val,
+                                    models=trained_models,
+                                    default_weights=default_weight_dict
+                                )
+
+                                # Apply calibrated weights in order of ensemble_predictions
+                                weights_array = []
+                                for model_name in ['xgboost', 'lightgbm', 'catboost', 'lstm', 'gru', 'lstm_attention', 'transformer']:
+                                    if model_name in trained_models:
+                                        weights_array.append(calibrated_weights.get(model_name, 0))
+
+                                weights_array = np.array(weights_array[:len(ensemble_predictions)])
+                            except Exception as e:
+                                self.logger.warning(f"{ticker}: Dynamic weight calibration failed - {e}, using defaults")
+                                weights_array = np.array(default_weights)
+                        else:
+                            # Use default weights
+                            weights_array = np.array(default_weights)
+
+                        # Ensure weights and predictions have same length
+                        if len(weights_array) != len(ensemble_predictions):
+                            self.logger.warning(f"{ticker}: Weight/prediction mismatch ({len(weights_array)} vs {len(ensemble_predictions)}), using defaults")
+                            weights_array = np.array(default_weights[:len(ensemble_predictions)])
+
+                        weights_array = weights_array / (weights_array.sum() + 1e-8)  # Normalize
+                        final_pred = np.average(ensemble_predictions, weights=weights_array)
+                        predictions[ticker] = float(final_pred)
+
+                        # Show model contributions
+                        model_names = []
+                        if len(ensemble_predictions) >= 1:
+                            model_names.append('XGB')
+                        if len(ensemble_predictions) >= 2:
+                            model_names.append('LGB')
+                        if len(ensemble_predictions) >= 3:
+                            model_names.append('CatBoost')
+                        if len(ensemble_predictions) >= 4:
+                            model_names.append('LSTM')
+                        if len(ensemble_predictions) >= 5:
+                            model_names.append('GRU')
+                        if len(ensemble_predictions) >= 6:
+                            model_names.append('LSTM+Attn')
+                        if len(ensemble_predictions) >= 7:
+                            model_names.append('Transformer')
+
+                        self.logger.info(f"{ticker}: Predicted return = {final_pred*100:+.2f}% (ensemble: {len(ensemble_predictions)} models: {', '.join(model_names)})")
+                    else:
+                        predictions[ticker] = 0.0
+                        self.logger.warning(f"{ticker}: No models succeeded, using 0.0")
 
                 except Exception as e:
                     self.logger.error(f"Prediction error for {ticker}: {e}")
                     predictions[ticker] = 0.0
 
-            self.logger.info(f"Generated predictions for {len(predictions)} tickers using ML ensemble")
+            self.logger.info(f"Generated predictions for {len(predictions)} tickers using {len(ensemble_predictions)}-model ensemble")
+
+            # Apply RealityCheck to predictions
+            if self.reality_check:
+                self.logger.info("Applying RealityCheck to predictions...")
+
+                # Calculate historical volatility for each ticker
+                historical_volatility = {}
+                for ticker, df in processed_data.items():
+                    returns = df['Close'].pct_change().dropna()
+                    historical_volatility[ticker] = returns.std()
+
+                # Adjust predictions conservatively
+                predictions = self.reality_check.adjust_predictions(
+                    predictions=predictions,
+                    historical_volatility=historical_volatility,
+                    model_complexity=len(ensemble_predictions)
+                )
+
+                self.logger.info("RealityCheck applied to predictions")
 
         except Exception as e:
             self.logger.error(f"ML prediction failed: {e}")
@@ -298,11 +715,62 @@ class PortfolioOrchestrator:
         Optimize portfolio allocation using ALL methods combined.
         Weights are determined by risk profile from config.
         """
-        # Calculate returns
-        returns_df = pd.DataFrame({
-            ticker: data['Close'].pct_change()
-            for ticker, data in processed_data.items()
-        }).dropna()
+        # Calculate returns per ticker
+        returns_dict = {}
+        for ticker, data in processed_data.items():
+            try:
+                # Calculate returns and clean
+                ticker_returns = data['Close'].pct_change()
+                ticker_returns = ticker_returns.replace([np.inf, -np.inf], np.nan)
+
+                # Check if this ticker has enough valid data
+                valid_count = ticker_returns.notna().sum()
+                total_count = len(ticker_returns)
+
+                if valid_count < 20:
+                    self.logger.warning(f"{ticker}: Insufficient valid returns ({valid_count}/{total_count}), skipping")
+                    continue
+
+                if valid_count / total_count < 0.5:
+                    self.logger.warning(f"{ticker}: Too many NaN values ({valid_count}/{total_count}), skipping")
+                    continue
+
+                returns_dict[ticker] = ticker_returns
+            except Exception as e:
+                self.logger.warning(f"{ticker}: Error calculating returns - {e}")
+
+        # Combine into dataframe
+        if not returns_dict:
+            self.logger.error("No valid tickers after return calculation")
+            raise ValueError("All tickers have invalid return data")
+
+        returns_df = pd.DataFrame(returns_dict)
+
+        # Drop rows where ALL values are NaN
+        returns_df = returns_df.dropna(how='all')
+
+        # Drop rows where ANY value is NaN (for optimization we need complete data)
+        returns_df = returns_df.dropna(how='any')
+
+        # Final validation: check for any remaining NaN per column
+        for col in returns_df.columns:
+            nan_count = returns_df[col].isnull().sum()
+            if nan_count > 0:
+                self.logger.error(f"{col}: Still has {nan_count} NaN values after cleaning!")
+                # Drop this column
+                returns_df = returns_df.drop(columns=[col])
+                self.logger.warning(f"{col}: Dropped due to persistent NaN values")
+
+        # Ensure we have enough data and tickers
+        if len(returns_df) < 20:
+            self.logger.error(f"Insufficient return data after cleaning: {len(returns_df)} rows")
+            raise ValueError("Insufficient data for optimization")
+
+        if len(returns_df.columns) == 0:
+            self.logger.error("No valid tickers remain after cleaning")
+            raise ValueError("All tickers have invalid data")
+
+        self.logger.info(f"Using {len(returns_df)} days of return data for {len(returns_df.columns)} tickers: {list(returns_df.columns)}")
 
         # Get risk profile and weights from config
         risk_profile = self.config.get('optimization.risk_profile', 'medium')
@@ -321,7 +789,8 @@ class PortfolioOrchestrator:
             self.logger.info("\n  Running Markowitz optimization...")
             markowitz_weights = self.optimizer.markowitz_optimization(
                 returns_df,
-                method='max_sharpe'
+                method='max_sharpe',
+                ml_predictions=predictions  # Use ML predictions instead of historical mean
             )
             all_weights['mean_variance'] = markowitz_weights
         except Exception as e:
@@ -336,20 +805,26 @@ class PortfolioOrchestrator:
             for ticker in returns_df.columns:
                 view_value = 0.0
                 # Add sentiment component (weight: 0.5)
-                if ticker in sentiment_scores:
+                if ticker in sentiment_scores and not np.isnan(sentiment_scores[ticker]):
                     view_value += sentiment_scores[ticker] * 0.05  # Scale sentiment
                 # Add ML prediction component (weight: 0.5)
-                if ticker in predictions:
+                if ticker in predictions and not np.isnan(predictions[ticker]):
                     view_value += predictions[ticker] * 0.5  # ML predicted return
 
-                if abs(view_value) > 0.001:  # Only include meaningful views
+                # Only include meaningful views (and check for NaN/inf)
+                if abs(view_value) > 0.001 and np.isfinite(view_value):
                     views[ticker] = view_value
 
-            bl_weights = self.optimizer.black_litterman_optimization(
-                returns_df,
-                views=views if views else None
-            )
-            all_weights['black_litterman'] = bl_weights
+            # Only run BL if we have valid views
+            if views:
+                bl_weights = self.optimizer.black_litterman_optimization(
+                    returns_df,
+                    views=views
+                )
+                all_weights['black_litterman'] = bl_weights
+            else:
+                self.logger.warning("  Black-Litterman: No valid views, skipping")
+                all_weights['black_litterman'] = {}
         except Exception as e:
             self.logger.error(f"  Black-Litterman failed: {e}")
             all_weights['black_litterman'] = {}
@@ -384,17 +859,72 @@ class PortfolioOrchestrator:
             self.logger.error(f"  RL agent failed: {e}")
             all_weights['rl_agent'] = {}
 
-        # Combine all methods using profile weights
+        # Combine all methods using profile weights (with optional dynamic calibration)
         combined_weights = {}
         tickers = returns_df.columns
 
-        for ticker in tickers:
-            combined_weights[ticker] = 0.0
+        # Calculate per-ticker weights using DynamicWeights if enabled
+        if self.dynamic_calibrator and len(returns_df) > 100:
+            self.logger.info("\n  Applying DynamicWeights to portfolio optimization methods...")
 
-            for method_name, method_weights in all_weights.items():
-                if method_weights and ticker in method_weights:
-                    method_weight = profile_weights.get(method_name, 0.0)
-                    combined_weights[ticker] += method_weights[ticker] * method_weight
+            # For each ticker, calibrate weights based on method performance
+            for ticker in tickers:
+                ticker_weights = 0.0
+
+                # Prepare optimization results for this ticker
+                optimization_results = {}
+                for method_name, method_alloc in all_weights.items():
+                    if method_alloc and ticker in method_alloc:
+                        # Calculate method-specific metrics
+                        single_ticker_weights = {ticker: 1.0}  # 100% allocation to this ticker
+                        try:
+                            metrics = self.optimizer.get_portfolio_metrics(
+                                single_ticker_weights,
+                                returns_df[[ticker]]
+                            )
+                            optimization_results[method_name] = {
+                                'allocation': method_alloc[ticker],
+                                'sharpe': metrics.get('sharpe_ratio', 0)
+                            }
+                        except:
+                            optimization_results[method_name] = {
+                                'allocation': method_alloc[ticker],
+                                'sharpe': 0
+                            }
+
+                # Calibrate weights for this ticker
+                try:
+                    # Get ML prediction for this ticker (if available)
+                    ml_pred = predictions.get(ticker, None) if predictions else None
+
+                    calibrated_profile_weights = self.dynamic_calibrator.calibrate_portfolio_weights(
+                        ticker=ticker,
+                        historical_returns=returns_df[ticker],
+                        optimization_results=optimization_results,
+                        default_weights=profile_weights,
+                        ml_prediction=ml_pred  # Pass ML prediction
+                    )
+                except Exception as e:
+                    self.logger.warning(f"  {ticker}: Portfolio weight calibration failed - {e}, using defaults")
+                    calibrated_profile_weights = profile_weights
+
+                # Apply calibrated weights
+                for method_name, method_weights in all_weights.items():
+                    if method_weights and ticker in method_weights:
+                        method_weight = calibrated_profile_weights.get(method_name, 0.0)
+                        ticker_weights += method_weights[ticker] * method_weight
+
+                combined_weights[ticker] = ticker_weights
+
+        else:
+            # Use static profile weights (original behavior)
+            for ticker in tickers:
+                combined_weights[ticker] = 0.0
+
+                for method_name, method_weights in all_weights.items():
+                    if method_weights and ticker in method_weights:
+                        method_weight = profile_weights.get(method_name, 0.0)
+                        combined_weights[ticker] += method_weights[ticker] * method_weight
 
         # Normalize to sum to 1
         total = sum(combined_weights.values())
@@ -419,16 +949,38 @@ class PortfolioOrchestrator:
             price_data = {ticker: df[['Open', 'High', 'Low', 'Close', 'Volume']]
                          for ticker, df in processed_data.items()}
 
-            # Use all features for RL
+            # Use all features for RL - STANDARDIZE TO SAME SIZE
             features = {}
+            feature_sizes = []
+
+            # First pass: collect all features and determine max size
+            temp_features = {}
             for ticker, df in processed_data.items():
                 feature_cols = [col for col in df.columns
                                if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
                 if feature_cols:
-                    features[ticker] = df[feature_cols]
+                    temp_features[ticker] = df[feature_cols]
+                    feature_sizes.append(len(feature_cols))
                 else:
                     # Fallback: use price-based features
-                    features[ticker] = df[['Close']].pct_change().fillna(0)
+                    temp_features[ticker] = df[['Close']].pct_change().fillna(0)
+                    feature_sizes.append(1)
+
+            # Determine max feature size
+            max_features = max(feature_sizes) if feature_sizes else 1
+
+            # Second pass: pad all features to max size
+            for ticker, feat_df in temp_features.items():
+                n_features = len(feat_df.columns)
+                if n_features < max_features:
+                    # Pad with zeros
+                    padding_cols = max_features - n_features
+                    for i in range(padding_cols):
+                        feat_df[f'pad_{i}'] = 0.0
+
+                features[ticker] = feat_df
+
+            self.logger.debug(f"RL features standardized to {max_features} features per ticker")
 
             # Initialize RL agent
             rl_config = self.config.get('optimization.reinforcement_learning', {})
@@ -452,7 +1004,17 @@ class PortfolioOrchestrator:
             quick_training = min(training_episodes, 500)  # Cap at 500 for speed
 
             self.logger.info(f"    Training RL agent for {quick_training} timesteps...")
-            agent.train(total_timesteps=quick_training)
+
+            # Suppress verbose output
+            import sys
+            from io import StringIO
+            old_stdout = sys.stdout
+            sys.stdout = StringIO()
+
+            try:
+                agent.train(total_timesteps=quick_training)
+            finally:
+                sys.stdout = old_stdout
 
             # Get current features for prediction
             current_features = {}
@@ -473,29 +1035,17 @@ class PortfolioOrchestrator:
             return {ticker: 1.0/len(tickers) for ticker in tickers}
 
     def print_results(self, results: Dict):
-        """Print results in formatted way."""
+        """Print results in clear, concise format."""
         print("\n" + "="*80)
-        print("PORTFOLIO ALLOCATION RESULTS")
+        print("PORTFOLIO ANALYSIS RESULTS")
         print("="*80)
 
-        # Risk profile
-        risk_profile = self.config.get('optimization.risk_profile', 'medium')
-        print(f"\n🎯 RISK PROFILE: {risk_profile.upper()}")
-        print(f"   Strategy: Combined all optimization methods")
-
-        # Portfolio weights
-        print("\n📊 PORTFOLIO WEIGHTS:")
-        print("-"*80)
-        weights = results['weights']
-        for ticker in sorted(weights.keys(), key=lambda x: weights[x], reverse=True):
-            if weights[ticker] > 0.01:
-                print(f"  {ticker:6s}: {weights[ticker]*100:6.2f}%")
-
-        # Discrete allocation
-        print("\n💰 SHARE ALLOCATION (Budget: ${:,.2f}):".format(results['budget']))
+        # Budget allocation per ticker
+        print("\nBUDGET ALLOCATION:")
         print("-"*80)
         allocation = results['allocation']
         prices = results['latest_prices']
+        weights = results['weights']
         total_invested = 0
 
         for ticker in sorted(allocation.keys(), key=lambda x: allocation[x] * prices.get(x, 0), reverse=True):
@@ -503,45 +1053,78 @@ class PortfolioOrchestrator:
             price = prices.get(ticker, 0)
             value = shares * price
             total_invested += value
-            print(f"  {ticker:6s}: {shares:4d} shares @ ${price:7.2f} = ${value:10,.2f}")
+            pct_of_budget = (value / results['budget']) * 100
+            print(f"  {ticker:6s}: ${value:10,.2f} ({pct_of_budget:5.1f}%) - {shares:4d} shares @ ${price:7.2f}")
 
-        print(f"\n  Total Invested: ${total_invested:,.2f}")
-        print(f"  Cash Remaining: ${results['budget'] - total_invested:,.2f}")
+        print(f"\n  Total Invested:  ${total_invested:,.2f}")
+        print(f"  Cash Remaining:  ${results['budget'] - total_invested:,.2f}")
 
-        # Performance metrics
-        print("\n📈 EXPECTED PERFORMANCE:")
+        # Time-based predictions
+        print("\nEXPECTED RETURNS:")
         print("-"*80)
         metrics = results['metrics']
-        print(f"  Annual Return:      {metrics['annual_return']*100:6.2f}%")
-        print(f"  Annual Volatility:  {metrics['annual_volatility']*100:6.2f}%")
-        print(f"  Sharpe Ratio:       {metrics['sharpe_ratio']:6.2f}")
-        print(f"  Sortino Ratio:      {metrics['sortino_ratio']:6.2f}")
-        print(f"  Max Drawdown:       {metrics['max_drawdown']*100:6.2f}%")
+        annual_return = metrics['annual_return']
 
-        # Risk metrics
-        print("\n⚠️  RISK METRICS:")
+        # Calculate predictions for different time periods
+        weekly_return = (1 + annual_return) ** (7/252) - 1
+        monthly_return = (1 + annual_return) ** (21/252) - 1
+        quarterly_return = (1 + annual_return) ** (63/252) - 1
+
+        print(f"  1 Week:     {weekly_return*100:+6.2f}%")
+        print(f"  1 Month:    {monthly_return*100:+6.2f}%")
+        print(f"  3 Months:   {quarterly_return*100:+6.2f}%")
+        print(f"  1 Year:     {annual_return*100:+6.2f}%")
+
+        # Confidence metrics
+        print("\nCONFIDENCE & RISK METRICS:")
         print("-"*80)
+        sharpe = metrics['sharpe_ratio']
+        sortino = metrics['sortino_ratio']
+        volatility = metrics['annual_volatility']
+        max_drawdown = metrics['max_drawdown']
         risk = results['risk_metrics']
-        print(f"  VaR (95%):          {risk['var_95']*100:6.2f}%")
-        print(f"  CVaR (95%):         {risk['cvar_95']*100:6.2f}%")
 
-        # Sentiment
-        if results['sentiment_scores']:
-            print("\n💭 SENTIMENT SCORES:")
-            print("-"*80)
-            for ticker, score in sorted(results['sentiment_scores'].items(), key=lambda x: x[1], reverse=True):
-                sentiment = "POSITIVE" if score > 0.1 else ("NEGATIVE" if score < -0.1 else "NEUTRAL")
-                print(f"  {ticker:6s}: {score:+.3f}  ({sentiment})")
+        # Use RealityCheck confidence if available
+        if 'reality_check' in metrics:
+            rc = metrics['reality_check']
+            confidence_pct = rc['confidence_pct']
+            confidence = rc['confidence_level']
+            print(f"  Confidence:       {confidence} ({confidence_pct:.0f}%)")
+        else:
+            # Fallback calculation
+            if sharpe > 1.0:
+                confidence = "HIGH"
+                confidence_pct = min(85 + (sharpe - 1.0) * 10, 95)
+            elif sharpe > 0.5:
+                confidence = "MEDIUM"
+                confidence_pct = 65 + (sharpe - 0.5) * 40
+            else:
+                confidence = "LOW"
+                confidence_pct = 40 + sharpe * 50
+            print(f"  Confidence:       {confidence} ({confidence_pct:.0f}%)")
 
-        # ML Predictions
-        if results['predictions']:
-            print("\n🤖 ML PREDICTIONS (Next Day Return):")
-            print("-"*80)
-            for ticker, pred in sorted(results['predictions'].items(), key=lambda x: x[1], reverse=True):
-                if abs(pred) > 0.001:
-                    direction = "↑ BULLISH" if pred > 0 else "↓ BEARISH"
-                    print(f"  {ticker:6s}: {pred*100:+6.2f}%  {direction}")
+        print(f"  Sharpe Ratio:     {sharpe:.2f}")
+        print(f"  Sortino Ratio:    {sortino:.2f}")
+        print(f"  Volatility:       {volatility*100:.2f}%")
+        print(f"  Max Drawdown:     {max_drawdown*100:.2f}%")
+        print(f"  VaR (95%):        {risk['var_95']*100:.2f}%")
+        print(f"  CVaR (95%):       {risk['cvar_95']*100:.2f}%")
+
+        # Estimated portfolio value
+        print("\nESTIMATED PORTFOLIO VALUE:")
+        print("-"*80)
+        current_value = total_invested
+        week_value = current_value * (1 + weekly_return)
+        month_value = current_value * (1 + monthly_return)
+        quarter_value = current_value * (1 + quarterly_return)
+        year_value = current_value * (1 + annual_return)
+
+        print(f"  Current:      ${current_value:>12,.2f}")
+        print(f"  1 Week:       ${week_value:>12,.2f}  ({(week_value-current_value):+,.2f})")
+        print(f"  1 Month:      ${month_value:>12,.2f}  ({(month_value-current_value):+,.2f})")
+        print(f"  3 Months:     ${quarter_value:>12,.2f}  ({(quarter_value-current_value):+,.2f})")
+        print(f"  1 Year:       ${year_value:>12,.2f}  ({(year_value-current_value):+,.2f})")
 
         print("\n" + "="*80)
-        print(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80 + "\n")
