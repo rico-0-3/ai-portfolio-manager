@@ -497,11 +497,12 @@ class PortfolioOrchestrator:
                     # 1. XGBoost
                     try:
                         if has_pretrained:
-                            # Load pretrained model
+                            # Load pretrained model (XGBoost Booster)
                             import pickle
+                            import xgboost as xgb
                             self.logger.debug(f"{ticker}: Loading pretrained XGBoost...")
                             with open(pretrained_dir / "model.pkl", 'rb') as f:
-                                xgb_model = pickle.load(f)
+                                bst = pickle.load(f)
                             with open(pretrained_dir / "scaler.pkl", 'rb') as f:
                                 scaler = pickle.load(f)
                             with open(pretrained_dir / "features.pkl", 'rb') as f:
@@ -516,14 +517,22 @@ class PortfolioOrchestrator:
                                 # Scale with pretrained scaler
                                 X_finetune_scaled = scaler.transform(X_finetune)
 
-                                # Quick fine-tuning (10% of original training)
-                                xgb_model.train(X_finetune_scaled[:-1], y_finetune[:-1])
+                                # Quick fine-tuning with xgb.train()
+                                dtrain_finetune = xgb.DMatrix(X_finetune_scaled[:-1], label=y_finetune[:-1])
+                                bst = xgb.train(
+                                    {'objective': 'reg:squarederror'},
+                                    dtrain_finetune,
+                                    num_boost_round=10,  # Quick fine-tuning
+                                    xgb_model=bst  # Continue from pretrained
+                                )
 
-                            # Scale test data
+                            # Scale test data and predict
                             X_test_scaled = scaler.transform(X_test)
-                            xgb_pred = xgb_model.predict(X_test_scaled)[0]
+                            dtest = xgb.DMatrix(X_test_scaled)
+                            xgb_pred = bst.predict(dtest)[0]
 
                             self.logger.info(f"{ticker}: ✓ Pretrained model (fine-tuned on {finetune_days}d)")
+                            xgb_model = bst  # Use booster for tracking
                         else:
                             # Train from scratch
                             self.logger.debug(f"{ticker}: Training XGBoost from scratch...")

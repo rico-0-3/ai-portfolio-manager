@@ -337,7 +337,7 @@ def train_advanced_model(
         # 1. Fetch data
         logger.info(f"📊 Step 1/10: Fetching {period} of data...")
         fetcher = MarketDataFetcher()
-        data = fetcher.fetch_data([ticker], period=period)
+        data = fetcher.fetch_stock_data([ticker], period=period)
 
         if ticker not in data or len(data[ticker]) < 500:
             logger.error(f"❌ Insufficient data ({len(data.get(ticker, []))} days)")
@@ -352,7 +352,9 @@ def train_advanced_model(
         feature_engineer = FeatureEngineer()
 
         df = tech_indicators.add_all_indicators(df)
-        df = feature_engineer.create_features(df)
+        df = feature_engineer.create_price_features(df)
+        df = feature_engineer.create_volume_features(df)
+        df = feature_engineer.create_volatility_features(df)
         df = add_temporal_features(df)  # NEW: Temporal features
         df = create_multi_horizon_targets(df)  # NEW: Multi-horizon
 
@@ -462,8 +464,11 @@ def train_advanced_model(
         # 9. Validate
         logger.info(f"📊 Step 9/10: Validation...")
 
-        val_pred = xgb_model.predict(X_val)
-        test_pred = xgb_model.predict(X_test)
+        dtest = xgb.DMatrix(X_test)
+        dval_pred = xgb.DMatrix(X_val)
+
+        val_pred = bst.predict(dval_pred)
+        test_pred = bst.predict(dtest)
 
         val_mae = np.mean(np.abs(val_pred - y_val))
         test_mae = np.mean(np.abs(test_pred - y_test))
@@ -478,7 +483,7 @@ def train_advanced_model(
 
         result = {
             'ticker': ticker,
-            'model': xgb_model,
+            'model': bst,
             'scaler': scaler,
             'selected_features': selected_features,
             'feature_importance': importance,
@@ -497,7 +502,7 @@ def train_advanced_model(
 
             # Save everything
             with open(ticker_dir / 'model.pkl', 'wb') as f:
-                pickle.dump(xgb_model, f)
+                pickle.dump(bst, f)
             with open(ticker_dir / 'scaler.pkl', 'wb') as f:
                 pickle.dump(scaler, f)
             with open(ticker_dir / 'features.pkl', 'wb') as f:
