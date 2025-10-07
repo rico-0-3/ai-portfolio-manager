@@ -55,15 +55,17 @@ class RealityCheck:
         self,
         predictions: Dict[str, float],
         historical_volatility: Dict[str, float],
-        model_complexity: int = 1
+        model_complexity: int = 1,
+        use_ml: bool = True
     ) -> Dict[str, float]:
         """
-        Apply conservative adjustment to ML predictions.
+        Apply conservative adjustment to predictions.
 
         Args:
             predictions: Dict of ticker to predicted return
             historical_volatility: Dict of ticker to volatility
             model_complexity: Number of models in ensemble (higher = more overfitting risk)
+            use_ml: If True, predictions come from ML (apply lighter penalties)
 
         Returns:
             Adjusted predictions
@@ -71,35 +73,51 @@ class RealityCheck:
         adjusted = {}
 
         for ticker, pred in predictions.items():
-            # 1. Apply out-of-sample degradation
-            # Research shows models perform 20-40% worse out-of-sample
-            adjusted_pred = pred * self.degradation_factor
+            if use_ml:
+                # ML predictions are already realistic - apply light adjustments only
 
-            # 2. Penalize extreme predictions (likely overfitting)
-            # If prediction > 2x volatility, it's suspicious
-            vol = historical_volatility.get(ticker, 0.02)  # Default 2% daily vol
+                # 1. Lighter out-of-sample degradation (ML already validated)
+                # Only 10% reduction instead of 30%
+                adjusted_pred = pred * 0.90
 
-            if abs(adjusted_pred) > 2 * vol:
-                # Apply aggressive penalty to extreme predictions
-                penalty = 0.5 + 0.5 * (2 * vol / max(abs(adjusted_pred), 1e-6))
-                adjusted_pred *= penalty
-                logger.debug(f"{ticker}: Extreme prediction {pred*100:.2f}% reduced to {adjusted_pred*100:.2f}%")
+                # 2. Check extreme predictions but with higher threshold
+                # Only penalize if > 3x volatility (not 2x)
+                vol = historical_volatility.get(ticker, 0.02)
+                if abs(adjusted_pred) > 3 * vol:
+                    penalty = 0.8 + 0.2 * (3 * vol / max(abs(adjusted_pred), 1e-6))
+                    adjusted_pred *= penalty
+                    logger.debug(f"{ticker}: Extreme ML prediction {pred*100:.2f}% reduced to {adjusted_pred*100:.2f}%")
 
-            # 3. Overfitting penalty based on model complexity
-            # More models = higher risk of overfitting
-            overfitting_penalty = 1.0 - (model_complexity - 1) * 0.05
-            overfitting_penalty = max(0.7, overfitting_penalty)  # Max 30% penalty
-            adjusted_pred *= overfitting_penalty
+                # 3. No overfitting penalty - ML uses cross-validation
 
-            # 4. Regression to mean - extreme predictions tend to revert
-            # Pull predictions toward zero
-            mean_reversion = 0.8  # 80% of prediction + 20% toward zero
-            adjusted_pred = adjusted_pred * mean_reversion
+                # 4. No mean reversion - ML already accounts for this
+
+            else:
+                # Historical predictions - apply full conservative adjustments
+
+                # 1. Apply out-of-sample degradation
+                adjusted_pred = pred * self.degradation_factor
+
+                # 2. Penalize extreme predictions
+                vol = historical_volatility.get(ticker, 0.02)
+                if abs(adjusted_pred) > 2 * vol:
+                    penalty = 0.5 + 0.5 * (2 * vol / max(abs(adjusted_pred), 1e-6))
+                    adjusted_pred *= penalty
+                    logger.debug(f"{ticker}: Extreme prediction {pred*100:.2f}% reduced to {adjusted_pred*100:.2f}%")
+
+                # 3. Overfitting penalty
+                overfitting_penalty = 1.0 - (model_complexity - 1) * 0.05
+                overfitting_penalty = max(0.7, overfitting_penalty)
+                adjusted_pred *= overfitting_penalty
+
+                # 4. Regression to mean
+                mean_reversion = 0.8
+                adjusted_pred = adjusted_pred * mean_reversion
 
             adjusted[ticker] = adjusted_pred
 
             if abs(pred - adjusted_pred) > 0.001:  # Log if change > 0.1%
-                logger.info(f"{ticker}: Prediction adjusted {pred*100:+.2f}% → {adjusted_pred*100:+.2f}%")
+                logger.info(f"{ticker}: Prediction adjusted {pred*100:+.2f}% → {adjusted_pred*100:+.2f}% (ML={use_ml})")
 
         return adjusted
 

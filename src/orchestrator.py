@@ -97,7 +97,9 @@ class PortfolioOrchestrator:
         self,
         tickers: List[str],
         period: str = '2y',
-        use_ml_predictions: bool = True
+        use_ml_predictions: bool = True,
+        use_pretrained: bool = True,
+        finetune_days: int = 30
     ) -> Dict:
         """
         Run complete pipeline from data acquisition to portfolio allocation.
@@ -107,6 +109,8 @@ class PortfolioOrchestrator:
             tickers: List of stock tickers
             period: Data period
             use_ml_predictions: Whether to use ML predictions
+            use_pretrained: Whether to load pretrained models (default: True)
+            finetune_days: Number of recent days for fine-tuning (default: 30)
 
         Returns:
             Dict with results including weights, metrics, and allocations
@@ -141,8 +145,16 @@ class PortfolioOrchestrator:
         # Step 5: ML predictions (optional)
         predictions = {}
         if use_ml_predictions:
-            self.logger.info("\n[5/7] Generating ML predictions...")
-            predictions = self._generate_predictions(processed_data, analyst_data)
+            if use_pretrained:
+                self.logger.info(f"\n[5/7] Loading pretrained models + fine-tuning ({finetune_days} days)...")
+            else:
+                self.logger.info("\n[5/7] Training models from scratch...")
+            predictions = self._generate_predictions(
+                processed_data,
+                analyst_data,
+                use_pretrained=use_pretrained,
+                finetune_days=finetune_days
+            )
         else:
             self.logger.info("\n[5/7] Skipping ML predictions")
 
@@ -385,9 +397,22 @@ class PortfolioOrchestrator:
     def _generate_predictions(
         self,
         processed_data: Dict[str, pd.DataFrame],
-        analyst_data: Optional[Dict] = None
+        analyst_data: Optional[Dict] = None,
+        use_pretrained: bool = True,
+        finetune_days: int = 30
     ) -> Dict[str, float]:
-        """Generate ML predictions using enhanced 7-model ensemble."""
+        """
+        Generate ML predictions using enhanced 7-model ensemble.
+
+        Args:
+            processed_data: Dict of ticker to DataFrame
+            analyst_data: Optional analyst data
+            use_pretrained: If True, load pretrained models instead of training from scratch
+            finetune_days: Number of recent days for fine-tuning (default: 30)
+
+        Returns:
+            Dict of ticker to predicted return
+        """
         predictions = {}
 
         try:
@@ -409,6 +434,19 @@ class PortfolioOrchestrator:
 
             for ticker, df in processed_data.items():
                 try:
+                    # Check for pretrained model
+                    pretrained_dir = Path(f"data/models/pretrained_advanced/{ticker}")
+                    has_pretrained = (
+                        use_pretrained and
+                        pretrained_dir.exists() and
+                        (pretrained_dir / "model.pkl").exists() and
+                        (pretrained_dir / "scaler.pkl").exists() and
+                        (pretrained_dir / "features.pkl").exists()
+                    )
+
+                    if has_pretrained:
+                        self.logger.info(f"{ticker}: Loading pretrained model...")
+
                     # Prepare features
                     if len(df) < 100:
                         self.logger.warning(f"{ticker}: Insufficient data ({len(df)} rows), skipping")
@@ -458,10 +496,41 @@ class PortfolioOrchestrator:
 
                     # 1. XGBoost
                     try:
-                        self.logger.debug(f"{ticker}: Training XGBoost...")
-                        xgb_model = XGBoostPredictor()
-                        xgb_model.train(X_train_sub, y_train_sub)
-                        xgb_pred = xgb_model.predict(X_test)[0]
+                        if has_pretrained:
+                            # Load pretrained model
+                            import pickle
+                            self.logger.debug(f"{ticker}: Loading pretrained XGBoost...")
+                            with open(pretrained_dir / "model.pkl", 'rb') as f:
+                                xgb_model = pickle.load(f)
+                            with open(pretrained_dir / "scaler.pkl", 'rb') as f:
+                                scaler = pickle.load(f)
+                            with open(pretrained_dir / "features.pkl", 'rb') as f:
+                                selected_features = pickle.load(f)
+
+                            # Fine-tuning on last N days
+                            if finetune_days > 0 and len(df) > finetune_days:
+                                self.logger.debug(f"{ticker}: Fine-tuning on last {finetune_days} days...")
+                                X_finetune = X[-finetune_days:]
+                                y_finetune = y[-finetune_days:]
+
+                                # Scale with pretrained scaler
+                                X_finetune_scaled = scaler.transform(X_finetune)
+
+                                # Quick fine-tuning (10% of original training)
+                                xgb_model.train(X_finetune_scaled[:-1], y_finetune[:-1])
+
+                            # Scale test data
+                            X_test_scaled = scaler.transform(X_test)
+                            xgb_pred = xgb_model.predict(X_test_scaled)[0]
+
+                            self.logger.info(f"{ticker}: ✓ Pretrained model (fine-tuned on {finetune_days}d)")
+                        else:
+                            # Train from scratch
+                            self.logger.debug(f"{ticker}: Training XGBoost from scratch...")
+                            xgb_model = XGBoostPredictor()
+                            xgb_model.train(X_train_sub, y_train_sub)
+                            xgb_pred = xgb_model.predict(X_test)[0]
+
                         ensemble_predictions.append(xgb_pred)
                         default_weights.append(xgb_weight)
                         trained_models['xgboost'] = xgb_model
@@ -469,42 +538,50 @@ class PortfolioOrchestrator:
                     except Exception as e:
                         self.logger.warning(f"{ticker}: XGBoost failed - {e}")
 
-                    # 2. LightGBM
-                    try:
-                        self.logger.debug(f"{ticker}: Training LightGBM...")
-                        lgb_model = LightGBMPredictor()
-                        lgb_model.train(X_train_sub, y_train_sub)
-                        lgb_pred = lgb_model.predict(X_test)[0]
-                        ensemble_predictions.append(lgb_pred)
-                        default_weights.append(lgb_weight)
-                        trained_models['lightgbm'] = lgb_model
-                        self.logger.debug(f"{ticker}: LightGBM prediction = {lgb_pred*100:+.2f}%")
-                    except Exception as e:
-                        self.logger.warning(f"{ticker}: LightGBM failed - {e}")
-
-                    # 3. CatBoost (if enabled)
-                    catboost_enabled = self.config.get('models.catboost.enabled', False)
-                    if catboost_enabled:
+                    # 2. LightGBM (skip if using pretrained)
+                    if not has_pretrained:
                         try:
-                            from src.models.ensemble_models import CatBoostPredictor
-                            catboost_weight = self.config.get('models.ensemble.catboost_weight', 0.10)
-                            cat_model = CatBoostPredictor()
-                            cat_model.train(X_train_sub, y_train_sub, verbose=False)
-                            cat_pred = cat_model.predict(X_test)[0]
-                            ensemble_predictions.append(cat_pred)
-                            default_weights.append(catboost_weight)
-                            trained_models['catboost'] = cat_model
+                            self.logger.debug(f"{ticker}: Training LightGBM...")
+                            lgb_model = LightGBMPredictor()
+                            lgb_model.train(X_train_sub, y_train_sub)
+                            lgb_pred = lgb_model.predict(X_test)[0]
+                            ensemble_predictions.append(lgb_pred)
+                            default_weights.append(lgb_weight)
+                            trained_models['lightgbm'] = lgb_model
+                            self.logger.debug(f"{ticker}: LightGBM prediction = {lgb_pred*100:+.2f}%")
                         except Exception as e:
-                            self.logger.warning(f"{ticker}: CatBoost failed - {e}")
+                            self.logger.warning(f"{ticker}: LightGBM failed - {e}")
 
-                    # Advanced models (if enabled and PyTorch available)
-                    if use_advanced and TORCH_AVAILABLE:
-                        sequence_length = self.config.get('models.lstm.sequence_length', 60)
+                        # 3. CatBoost (skip if using pretrained)
+                        catboost_enabled = self.config.get('models.catboost.enabled', False)
+                        if catboost_enabled and not has_pretrained:
+                            try:
+                                from src.models.ensemble_models import CatBoostPredictor
+                                catboost_weight = self.config.get('models.ensemble.catboost_weight', 0.10)
+                                cat_model = CatBoostPredictor()
+                                cat_model.train(X_train_sub, y_train_sub, verbose=False)
+                                cat_pred = cat_model.predict(X_test)[0]
+                                ensemble_predictions.append(cat_pred)
+                                default_weights.append(catboost_weight)
+                                trained_models['catboost'] = cat_model
+                            except Exception as e:
+                                self.logger.warning(f"{ticker}: CatBoost failed - {e}")
 
-                        # Prepare sequence data
-                        if len(X_train_sub) >= sequence_length:
-                            # Create sequences from training subset
-                            X_seq_train = []
+                        # Advanced models (skip if using pretrained)
+                        if use_advanced and TORCH_AVAILABLE and not has_pretrained:
+                            sequence_length = self.config.get('models.lstm.sequence_length', 60)
+
+                            # Prepare sequence data
+                            if len(X_train_sub) >= sequence_length:
+                                # Calculate dynamic epochs based on data size
+                                # Target: ~5000 training steps total
+                                # More data → fewer epochs needed
+                                num_samples = len(X_train_sub) - sequence_length
+                                target_steps = 5000
+                                dynamic_epochs = max(10, min(100, int(target_steps / max(num_samples, 1))))
+                                self.logger.debug(f"{ticker}: Using {dynamic_epochs} epochs for {num_samples} samples")
+                                # Create sequences from training subset
+                                X_seq_train = []
                             y_seq_train = []
                             for i in range(sequence_length, len(X_train_sub)):
                                 X_seq_train.append(X_train_sub[i-sequence_length:i])
@@ -524,7 +601,7 @@ class PortfolioOrchestrator:
                                     dropout=self.config.get('models.lstm.dropout', 0.2),
                                     learning_rate=self.config.get('models.lstm.learning_rate', 0.001)
                                 )
-                                lstm_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)  # Quick train
+                                lstm_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
                                 lstm_pred_raw = lstm_trainer.predict(X_seq_test)
                                 # Handle both scalar and array returns
                                 lstm_pred = float(lstm_pred_raw[0]) if hasattr(lstm_pred_raw, '__len__') else float(lstm_pred_raw)
@@ -544,7 +621,7 @@ class PortfolioOrchestrator:
                                     dropout=self.config.get('models.gru.dropout', 0.2),
                                     learning_rate=self.config.get('models.gru.learning_rate', 0.001)
                                 )
-                                gru_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)
+                                gru_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
                                 gru_pred_raw = gru_trainer.predict(X_seq_test)
                                 gru_pred = float(gru_pred_raw[0]) if hasattr(gru_pred_raw, '__len__') else float(gru_pred_raw)
                                 ensemble_predictions.append(gru_pred)
@@ -565,7 +642,7 @@ class PortfolioOrchestrator:
                                     dropout=self.config.get('models.lstm_attention.dropout', 0.2),
                                     learning_rate=self.config.get('models.lstm_attention.learning_rate', 0.001)
                                 )
-                                lstm_attn_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)
+                                lstm_attn_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
                                 lstm_attn_pred_raw = lstm_attn_trainer.predict(X_seq_test)
                                 lstm_attn_pred = float(lstm_attn_pred_raw[0]) if hasattr(lstm_attn_pred_raw, '__len__') else float(lstm_attn_pred_raw)
                                 ensemble_predictions.append(lstm_attn_pred)
@@ -588,7 +665,7 @@ class PortfolioOrchestrator:
                                     dropout=self.config.get('models.transformer.dropout', 0.1),
                                     learning_rate=self.config.get('models.transformer.learning_rate', 0.001)
                                 )
-                                transformer_trainer.train(X_seq_train, y_seq_train, epochs=10, verbose=False)
+                                transformer_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
                                 transformer_pred_raw = transformer_trainer.predict(X_seq_test)
                                 transformer_pred = float(transformer_pred_raw[0]) if hasattr(transformer_pred_raw, '__len__') else float(transformer_pred_raw)
                                 ensemble_predictions.append(transformer_pred)
@@ -688,11 +765,12 @@ class PortfolioOrchestrator:
                     returns = df['Close'].pct_change().dropna()
                     historical_volatility[ticker] = returns.std()
 
-                # Adjust predictions conservatively
+                # Adjust predictions conservatively (use_ml=True for lighter penalties)
                 predictions = self.reality_check.adjust_predictions(
                     predictions=predictions,
                     historical_volatility=historical_volatility,
-                    model_complexity=len(ensemble_predictions)
+                    model_complexity=len(ensemble_predictions),
+                    use_ml=True  # ML predictions are already realistic
                 )
 
                 self.logger.info("RealityCheck applied to predictions")
@@ -832,7 +910,10 @@ class PortfolioOrchestrator:
         # 3. Risk Parity
         try:
             self.logger.info("  Running Risk Parity optimization...")
-            rp_weights = self.optimizer.risk_parity_optimization(returns_df)
+            rp_weights = self.optimizer.risk_parity_optimization(
+                returns_df,
+                ml_predictions=predictions
+            )
             all_weights['risk_parity'] = rp_weights
         except Exception as e:
             self.logger.error(f"  Risk Parity failed: {e}")
@@ -853,7 +934,7 @@ class PortfolioOrchestrator:
         # 5. RL Agent
         try:
             self.logger.info("  Running RL agent optimization...")
-            rl_weights = self._get_rl_allocation(processed_data, returns_df)
+            rl_weights = self._get_rl_allocation(processed_data, returns_df, predictions)
             all_weights['rl_agent'] = rl_weights
         except Exception as e:
             self.logger.error(f"  RL agent failed: {e}")
@@ -938,10 +1019,11 @@ class PortfolioOrchestrator:
     def _get_rl_allocation(
         self,
         processed_data: Dict[str, pd.DataFrame],
-        returns_df: pd.DataFrame
+        returns_df: pd.DataFrame,
+        ml_predictions: Optional[Dict[str, float]] = None
     ) -> Dict[str, float]:
         """
-        Get portfolio allocation using RL agent.
+        Get portfolio allocation using RL agent with optional ML-aware reward.
         Trains a quick RL agent on historical data.
         """
         try:
@@ -991,19 +1073,25 @@ class PortfolioOrchestrator:
                 config=self.config.config
             )
 
-            # Create environment
+            # Create environment (ML-aware if predictions available)
             agent.create_environment(
                 price_data=price_data,
                 features=features,
                 initial_balance=self.config.get('portfolio.initial_budget', 10000),
-                transaction_cost=self.config.get('portfolio.transaction_cost', 0.001)
+                transaction_cost=self.config.get('portfolio.transaction_cost', 0.001),
+                ml_predictions=ml_predictions
             )
 
-            # Quick training (reduced episodes for speed)
+            # Dynamic training timesteps based on available data
+            # More data → more timesteps (but capped for speed)
+            num_dates = len(agent.env.envs[0].dates) if hasattr(agent.env, 'envs') else 252
             training_episodes = rl_config.get('training_episodes', 1000)
-            quick_training = min(training_episodes, 500)  # Cap at 500 for speed
 
-            self.logger.info(f"    Training RL agent for {quick_training} timesteps...")
+            # Scale timesteps: min 500, max 2000, proportional to data
+            dynamic_timesteps = max(500, min(2000, int(num_dates * 2)))
+            quick_training = min(training_episodes, dynamic_timesteps)
+
+            self.logger.info(f"    Training RL agent for {quick_training} timesteps ({num_dates} days available)...")
 
             # Suppress verbose output
             import sys

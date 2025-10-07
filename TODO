@@ -1,5 +1,4 @@
-- Finire di implementare ML su metodi rimanenti
-- Vedere se return si basa su ML
-- Testare con 5y di storico piuttosto che 2. Vedere anche se aumentare timestamp su ML (ora mi sembra sono 500)
+- pre allenare modello
+- Testare con modello pre allenato
 - Sistemare return e tutto
 - Automatizzare il tutto

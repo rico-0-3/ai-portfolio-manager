@@ -16,6 +16,8 @@ BUDGET=""
 PERIOD="2y"
 RISK_PROFILE=""
 USE_ML="true"
+USE_PRETRAINED="true"
+FINETUNE_DAYS="30"
 OUTPUT_FILE=""
 
 # Help function
@@ -38,6 +40,8 @@ OPTIONS:
                           medium = balanced (mix of all methods)
                           high = aggressive (focus on max returns)
     --no-ml               Disable ML predictions
+    --no-pretrained       Disable pretrained models (train from scratch)
+    --finetune-days NUM   Days for fine-tuning pretrained models (default: 30)
     --output FILE         Save results to JSON file
     -h, --help            Show this help message
 
@@ -86,6 +90,14 @@ while [[ $# -gt 0 ]]; do
         --no-ml)
             USE_ML="false"
             shift
+            ;;
+        --no-pretrained)
+            USE_PRETRAINED="false"
+            shift
+            ;;
+        --finetune-days)
+            FINETUNE_DAYS="$2"
+            shift 2
             ;;
         --output)
             OUTPUT_FILE="$2"
@@ -156,6 +168,10 @@ else
     echo "  Risk Profile:      From config.yaml"
 fi
 echo "  ML Predictions:    ${USE_ML}"
+echo "  Pretrained Models: ${USE_PRETRAINED}"
+if [ "$USE_PRETRAINED" = "true" ]; then
+    echo "  Fine-tune Days:    ${FINETUNE_DAYS}"
+fi
 if [ -n "$OUTPUT_FILE" ]; then
     echo "  Output File:       ${OUTPUT_FILE}"
 fi
@@ -198,6 +214,8 @@ def main():
     parser.add_argument('--period', default='2y')
     parser.add_argument('--risk', default=None)
     parser.add_argument('--use-ml', action='store_true')
+    parser.add_argument('--use-pretrained', action='store_true')
+    parser.add_argument('--finetune-days', type=int, default=30)
     parser.add_argument('--output', default='')
 
     args = parser.parse_args()
@@ -216,7 +234,9 @@ def main():
     results = orchestrator.run_full_pipeline(
         tickers=args.tickers,
         period=args.period,
-        use_ml_predictions=args.use_ml
+        use_ml_predictions=args.use_ml,
+        use_pretrained=args.use_pretrained,
+        finetune_days=args.finetune_days
     )
 
     # Print results
@@ -265,6 +285,10 @@ fi
 
 if [ "$USE_ML" = "true" ]; then
     PYTHON_CMD="$PYTHON_CMD --use-ml"
+fi
+
+if [ "$USE_PRETRAINED" = "true" ]; then
+    PYTHON_CMD="$PYTHON_CMD --use-pretrained --finetune-days $FINETUNE_DAYS"
 fi
 
 if [ -n "$OUTPUT_FILE" ]; then

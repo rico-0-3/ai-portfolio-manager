@@ -32,7 +32,8 @@ class PortfolioEnv(gym.Env):
         initial_balance: Optional[float] = None,
         transaction_cost: Optional[float] = None,
         max_steps: Optional[int] = None,
-        config: Optional[Dict] = None
+        config: Optional[Dict] = None,
+        ml_predictions: Optional[Dict[str, float]] = None
     ):
         """
         Initialize portfolio environment.
@@ -44,6 +45,7 @@ class PortfolioEnv(gym.Env):
             transaction_cost: Transaction cost as fraction (if None, uses config or default)
             max_steps: Maximum steps per episode
             config: Config dict (optional)
+            ml_predictions: Optional ML predictions for ML-aware reward
         """
         super(PortfolioEnv, self).__init__()
 
@@ -51,6 +53,7 @@ class PortfolioEnv(gym.Env):
         self.features = features
         self.tickers = list(price_data.keys())
         self.n_assets = len(self.tickers)
+        self.ml_predictions = ml_predictions or {}
 
         # Load from config if provided
         if config:
@@ -158,6 +161,22 @@ class PortfolioEnv(gym.Env):
 
             next_value = self.balance + np.sum(self.positions * next_prices)
             reward = (next_value - self.portfolio_value) / self.portfolio_value
+
+            # ML-aware reward: bonus for actions aligned with ML predictions
+            if self.ml_predictions:
+                ml_alignment = 0.0
+                for i, ticker in enumerate(self.tickers):
+                    ml_pred = self.ml_predictions.get(ticker, 0)
+                    weight = action[i]
+
+                    # Reward allocating to assets with positive ML predictions
+                    if ml_pred > 0.01:  # Strong positive prediction
+                        ml_alignment += weight * ml_pred * 0.5  # 50% bonus
+                    elif ml_pred < -0.01:  # Strong negative prediction
+                        ml_alignment -= weight * abs(ml_pred) * 0.3  # 30% penalty
+
+                # Add ML alignment bonus to reward
+                reward += ml_alignment
         else:
             reward = 0
 
@@ -224,15 +243,17 @@ class RLPortfolioAgent:
         price_data: Dict[str, pd.DataFrame],
         features: Dict[str, pd.DataFrame],
         initial_balance: Optional[float] = None,
-        transaction_cost: Optional[float] = None
+        transaction_cost: Optional[float] = None,
+        ml_predictions: Optional[Dict[str, float]] = None
     ):
-        """Create training environment."""
+        """Create training environment with optional ML predictions."""
         self.env = PortfolioEnv(
             price_data=price_data,
             features=features,
             initial_balance=initial_balance,
             transaction_cost=transaction_cost,
-            config=self.config
+            config=self.config,
+            ml_predictions=ml_predictions
         )
 
         # Wrap in vectorized environment
