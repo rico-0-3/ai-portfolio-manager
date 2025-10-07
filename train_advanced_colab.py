@@ -245,7 +245,19 @@ def optimize_xgboost_hyperparameters(
             'colsample_bytree': 0.8
         }
 
+    # Check GPU availability
+    use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
+    device = 'cuda' if use_gpu else 'cpu'
+
+    if use_gpu:
+        logger.info(f"  🚀 GPU acceleration enabled for Optuna trials")
+
     logger.info(f"  Optimizing XGBoost hyperparameters ({n_trials} trials)...")
+
+    # Prepare DMatrix for GPU
+    import xgboost as xgb
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
 
     def objective(trial):
         params = {
@@ -255,23 +267,45 @@ def optimize_xgboost_hyperparameters(
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-            'gamma': trial.suggest_float('gamma', 0, 5)
+            'gamma': trial.suggest_float('gamma', 0, 5),
+            'objective': 'reg:squarederror',
+            'eval_metric': 'mae',
+            'tree_method': 'hist',
+            'device': device
         }
 
-        model = XGBoostPredictor(**params)
-        model.train(X_train, y_train)
+        # Train with xgb.train for GPU support
+        bst = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=params['n_estimators'],
+            evals=[(dval, 'val')],
+            early_stopping_rounds=50,
+            verbose_eval=False
+        )
 
-        val_pred = model.predict(X_val)
+        # Get validation MAE
+        val_pred = bst.predict(dval)
         mae = np.mean(np.abs(val_pred - y_val))
 
         return mae
 
-    # Run optimization
+    # Run optimization with parallel trials for GPU saturation
     study = optuna.create_study(
         direction='minimize',
         sampler=TPESampler(seed=42)
     )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    # Calculate optimal n_jobs based on GPU memory
+    if use_gpu:
+        # T4 (15GB) can handle 3-4 parallel trials
+        # Smaller GPUs: 2 trials
+        n_jobs = 4 if torch.cuda.get_device_properties(0).total_memory > 12e9 else 2
+        logger.info(f"  Running {n_jobs} parallel trials to saturate GPU")
+    else:
+        n_jobs = 1
+
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
 
     best_params = study.best_params
     logger.info(f"  Best MAE: {study.best_value:.6f}")
@@ -439,11 +473,28 @@ def train_advanced_model(
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dval = xgb.DMatrix(X_val, label=y_val)
 
+        # Determine device and optimize for GPU
+        use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
+
         xgb_params = {
             **best_params,
             'objective': 'reg:squarederror',
-            'eval_metric': 'mae'
+            'eval_metric': 'mae',
+            'tree_method': 'hist',  # GPU-accelerated histogram method
+            'device': 'cuda' if use_gpu else 'cpu'
         }
+
+        # GPU-specific optimizations
+        if use_gpu:
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            # Increase max_bin for larger GPUs (more GPU work)
+            xgb_params['max_bin'] = 512 if gpu_memory_gb > 12 else 256
+            # Grow policy for better GPU utilization
+            xgb_params['grow_policy'] = 'depthwise'  # Better for GPU
+            logger.info(f"  🚀 GPU optimized: max_bin={xgb_params['max_bin']}")
+
+        if xgb_params['device'] == 'cuda':
+            logger.info(f"  🚀 Using GPU acceleration")
 
         evals = [(dtrain, 'train'), (dval, 'val')]
         bst = xgb.train(
@@ -541,6 +592,8 @@ def main():
     parser.add_argument('--period', type=str, default='10y', choices=['5y', '10y', 'max'])
     parser.add_argument('--output', type=str, default='data/models/pretrained_advanced')
     parser.add_argument('--optimize', action='store_true', help='Enable hyperparameter optimization')
+    parser.add_argument('--resume', action='store_true', help='Skip already trained tickers (auto-resume)')
+    parser.add_argument('--parallel-tickers', type=int, default=1, help='Number of tickers to train in parallel (GPU only)')
 
     args = parser.parse_args()
 
@@ -557,9 +610,39 @@ def main():
     save_dir = Path(args.output)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # GPU check
+    # Auto-resume: skip already trained tickers
+    if args.resume:
+        already_trained = []
+        for ticker in tickers:
+            ticker_dir = save_dir / ticker
+            if (ticker_dir / 'model.pkl').exists() and (ticker_dir / 'metadata.json').exists():
+                already_trained.append(ticker)
+
+        if already_trained:
+            logger.info(f"🔄 RESUME MODE: Skipping {len(already_trained)} already trained tickers")
+            logger.info(f"   Already done: {', '.join(already_trained[:10])}{'...' if len(already_trained) > 10 else ''}")
+            tickers = [t for t in tickers if t not in already_trained]
+            logger.info(f"   Remaining: {len(tickers)} tickers\n")
+
+        if not tickers:
+            logger.info("✅ All tickers already trained!")
+            return
+
+    # GPU check and parallel setup
+    use_parallel = args.parallel_tickers > 1
     if TORCH_AVAILABLE and torch.cuda.is_available():
-        logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
+        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory_gb:.1f} GB)")
+
+        # Auto-adjust parallel tickers based on GPU memory
+        if use_parallel:
+            max_parallel = int(gpu_memory_gb / 4)  # ~4GB per ticker
+            if args.parallel_tickers > max_parallel:
+                logger.warning(f"⚠️  Reducing parallel tickers from {args.parallel_tickers} to {max_parallel} (GPU memory limit)")
+                args.parallel_tickers = max_parallel
+
+            logger.info(f"🔥 Parallel mode: {args.parallel_tickers} tickers simultaneously")
+            logger.info(f"   Expected GPU saturation: ~{args.parallel_tickers * 30}% utilization")
 
     # Train
     logger.info(f"\n{'='*70}")
@@ -567,15 +650,42 @@ def main():
     logger.info(f"{'='*70}\n")
 
     results = []
-    for i, ticker in enumerate(tickers, 1):
-        logger.info(f"\n[{i}/{len(tickers)}] {ticker}")
-        result = train_advanced_model(
-            ticker, config, args.period,
-            optimize_hp=args.optimize,
-            save_dir=save_dir
-        )
-        if result:
-            results.append(result)
+
+    if use_parallel and TORCH_AVAILABLE and torch.cuda.is_available():
+        # Parallel training with ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def train_wrapper(ticker):
+            logger.info(f"\n🔄 Starting: {ticker}")
+            return train_advanced_model(
+                ticker, config, args.period,
+                optimize_hp=args.optimize,
+                save_dir=save_dir
+            )
+
+        with ThreadPoolExecutor(max_workers=args.parallel_tickers) as executor:
+            futures = {executor.submit(train_wrapper, ticker): ticker for ticker in tickers}
+
+            for i, future in enumerate(as_completed(futures), 1):
+                ticker = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                        logger.info(f"✅ [{len(results)}/{len(tickers)}] {ticker} complete")
+                except Exception as e:
+                    logger.error(f"❌ {ticker} failed in parallel: {e}")
+    else:
+        # Sequential training
+        for i, ticker in enumerate(tickers, 1):
+            logger.info(f"\n[{i}/{len(tickers)}] {ticker}")
+            result = train_advanced_model(
+                ticker, config, args.period,
+                optimize_hp=args.optimize,
+                save_dir=save_dir
+            )
+            if result:
+                results.append(result)
 
     logger.info(f"\n✅ Complete: {len(results)}/{len(tickers)} successful")
 
