@@ -582,100 +582,100 @@ class PortfolioOrchestrator:
                                 self.logger.debug(f"{ticker}: Using {dynamic_epochs} epochs for {num_samples} samples")
                                 # Create sequences from training subset
                                 X_seq_train = []
-                            y_seq_train = []
-                            for i in range(sequence_length, len(X_train_sub)):
-                                X_seq_train.append(X_train_sub[i-sequence_length:i])
-                                y_seq_train.append(y_train_sub[i])
-                            X_seq_train = np.array(X_seq_train)
-                            y_seq_train = np.array(y_seq_train)
+                                y_seq_train = []
+                                for i in range(sequence_length, len(X_train_sub)):
+                                    X_seq_train.append(X_train_sub[i-sequence_length:i])
+                                    y_seq_train.append(y_train_sub[i])
+                                X_seq_train = np.array(X_seq_train)
+                                y_seq_train = np.array(y_seq_train)
 
-                            # Last sequence for prediction
-                            X_seq_test = X[-sequence_length:].reshape(1, sequence_length, -1)
+                                # Last sequence for prediction
+                                X_seq_test = X[-sequence_length:].reshape(1, sequence_length, -1)
 
-                            # 4. LSTM
-                            try:
-                                lstm_trainer = LSTMTrainer(
-                                    model_type='lstm',
-                                    input_size=X.shape[1],
-                                    hidden_sizes=self.config.get('models.lstm.hidden_units', [128, 64, 32]),
-                                    dropout=self.config.get('models.lstm.dropout', 0.2),
-                                    learning_rate=self.config.get('models.lstm.learning_rate', 0.001)
-                                )
-                                lstm_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
-                                lstm_pred_raw = lstm_trainer.predict(X_seq_test)
-                                # Handle both scalar and array returns
-                                lstm_pred = float(lstm_pred_raw[0]) if hasattr(lstm_pred_raw, '__len__') else float(lstm_pred_raw)
-                                ensemble_predictions.append(lstm_pred)
-                                default_weights.append(lstm_weight)
-                                trained_models['lstm'] = lstm_trainer
-                                self.logger.debug(f"{ticker}: LSTM prediction = {lstm_pred*100:+.2f}%")
-                            except Exception as e:
-                                self.logger.warning(f"{ticker}: LSTM failed - {e}")
+                                # 4. LSTM
+                                try:
+                                    lstm_trainer = LSTMTrainer(
+                                        model_type='lstm',
+                                        input_size=X.shape[1],
+                                        hidden_sizes=self.config.get('models.lstm.hidden_units', [128, 64, 32]),
+                                        dropout=self.config.get('models.lstm.dropout', 0.2),
+                                        learning_rate=self.config.get('models.lstm.learning_rate', 0.001)
+                                    )
+                                    lstm_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
+                                    lstm_pred_raw = lstm_trainer.predict(X_seq_test)
+                                    # Handle both scalar and array returns
+                                    lstm_pred = float(lstm_pred_raw[0]) if hasattr(lstm_pred_raw, '__len__') else float(lstm_pred_raw)
+                                    ensemble_predictions.append(lstm_pred)
+                                    default_weights.append(lstm_weight)
+                                    trained_models['lstm'] = lstm_trainer
+                                    self.logger.debug(f"{ticker}: LSTM prediction = {lstm_pred*100:+.2f}%")
+                                except Exception as e:
+                                    self.logger.warning(f"{ticker}: LSTM failed - {e}")
 
-                            # 5. GRU
-                            try:
-                                gru_trainer = LSTMTrainer(
-                                    model_type='gru',
-                                    input_size=X.shape[1],
-                                    hidden_sizes=self.config.get('models.gru.hidden_units', [100, 50]),
-                                    dropout=self.config.get('models.gru.dropout', 0.2),
-                                    learning_rate=self.config.get('models.gru.learning_rate', 0.001)
-                                )
-                                gru_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
-                                gru_pred_raw = gru_trainer.predict(X_seq_test)
-                                gru_pred = float(gru_pred_raw[0]) if hasattr(gru_pred_raw, '__len__') else float(gru_pred_raw)
-                                ensemble_predictions.append(gru_pred)
-                                default_weights.append(gru_weight)
-                                trained_models['gru'] = gru_trainer
-                                self.logger.debug(f"{ticker}: GRU prediction = {gru_pred*100:+.2f}%")
-                            except Exception as e:
-                                self.logger.warning(f"{ticker}: GRU failed - {e}")
+                                # 5. GRU
+                                try:
+                                    gru_trainer = LSTMTrainer(
+                                        model_type='gru',
+                                        input_size=X.shape[1],
+                                        hidden_sizes=self.config.get('models.gru.hidden_units', [100, 50]),
+                                        dropout=self.config.get('models.gru.dropout', 0.2),
+                                        learning_rate=self.config.get('models.gru.learning_rate', 0.001)
+                                    )
+                                    gru_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
+                                    gru_pred_raw = gru_trainer.predict(X_seq_test)
+                                    gru_pred = float(gru_pred_raw[0]) if hasattr(gru_pred_raw, '__len__') else float(gru_pred_raw)
+                                    ensemble_predictions.append(gru_pred)
+                                    default_weights.append(gru_weight)
+                                    trained_models['gru'] = gru_trainer
+                                    self.logger.debug(f"{ticker}: GRU prediction = {gru_pred*100:+.2f}%")
+                                except Exception as e:
+                                    self.logger.warning(f"{ticker}: GRU failed - {e}")
 
-                            # 6. LSTM with Attention
-                            try:
-                                lstm_attn_trainer = TransformerTrainer(
-                                    model_type='lstm_attention',
-                                    input_dim=X.shape[1],
-                                    d_model=self.config.get('models.lstm_attention.hidden_size', 128),
-                                    nhead=1,  # Not used for LSTM attention
-                                    num_layers=self.config.get('models.lstm_attention.num_layers', 2),
-                                    dropout=self.config.get('models.lstm_attention.dropout', 0.2),
-                                    learning_rate=self.config.get('models.lstm_attention.learning_rate', 0.001)
-                                )
-                                lstm_attn_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
-                                lstm_attn_pred_raw = lstm_attn_trainer.predict(X_seq_test)
-                                lstm_attn_pred = float(lstm_attn_pred_raw[0]) if hasattr(lstm_attn_pred_raw, '__len__') else float(lstm_attn_pred_raw)
-                                ensemble_predictions.append(lstm_attn_pred)
-                                default_weights.append(lstm_attn_weight)
-                                trained_models['lstm_attention'] = lstm_attn_trainer
-                                self.logger.debug(f"{ticker}: LSTM+Attention prediction = {lstm_attn_pred*100:+.2f}%")
-                            except Exception as e:
-                                self.logger.warning(f"{ticker}: LSTM+Attention failed - {e}")
+                                # 6. LSTM with Attention
+                                try:
+                                    lstm_attn_trainer = TransformerTrainer(
+                                        model_type='lstm_attention',
+                                        input_dim=X.shape[1],
+                                        d_model=self.config.get('models.lstm_attention.hidden_size', 128),
+                                        nhead=1,  # Not used for LSTM attention
+                                        num_layers=self.config.get('models.lstm_attention.num_layers', 2),
+                                        dropout=self.config.get('models.lstm_attention.dropout', 0.2),
+                                        learning_rate=self.config.get('models.lstm_attention.learning_rate', 0.001)
+                                    )
+                                    lstm_attn_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
+                                    lstm_attn_pred_raw = lstm_attn_trainer.predict(X_seq_test)
+                                    lstm_attn_pred = float(lstm_attn_pred_raw[0]) if hasattr(lstm_attn_pred_raw, '__len__') else float(lstm_attn_pred_raw)
+                                    ensemble_predictions.append(lstm_attn_pred)
+                                    default_weights.append(lstm_attn_weight)
+                                    trained_models['lstm_attention'] = lstm_attn_trainer
+                                    self.logger.debug(f"{ticker}: LSTM+Attention prediction = {lstm_attn_pred*100:+.2f}%")
+                                except Exception as e:
+                                    self.logger.warning(f"{ticker}: LSTM+Attention failed - {e}")
 
-                            # 7. Transformer
-                            try:
-                                self.logger.debug(f"{ticker}: Training Transformer...")
-                                transformer_trainer = TransformerTrainer(
-                                    model_type='transformer',
-                                    input_dim=X.shape[1],
-                                    d_model=self.config.get('models.transformer.d_model', 128),
-                                    nhead=self.config.get('models.transformer.nhead', 8),
-                                    num_layers=self.config.get('models.transformer.num_layers', 4),
-                                    dim_feedforward=self.config.get('models.transformer.dim_feedforward', 512),
-                                    dropout=self.config.get('models.transformer.dropout', 0.1),
-                                    learning_rate=self.config.get('models.transformer.learning_rate', 0.001)
-                                )
-                                transformer_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
-                                transformer_pred_raw = transformer_trainer.predict(X_seq_test)
-                                transformer_pred = float(transformer_pred_raw[0]) if hasattr(transformer_pred_raw, '__len__') else float(transformer_pred_raw)
-                                ensemble_predictions.append(transformer_pred)
-                                default_weights.append(transformer_weight)
-                                trained_models['transformer'] = transformer_trainer
-                                self.logger.debug(f"{ticker}: Transformer prediction = {transformer_pred*100:+.2f}%")
-                            except Exception as e:
-                                self.logger.warning(f"{ticker}: Transformer failed - {e}")
-                                import traceback
-                                self.logger.debug(f"Transformer traceback: {traceback.format_exc()}")
+                                # 7. Transformer
+                                try:
+                                    self.logger.debug(f"{ticker}: Training Transformer...")
+                                    transformer_trainer = TransformerTrainer(
+                                        model_type='transformer',
+                                        input_dim=X.shape[1],
+                                        d_model=self.config.get('models.transformer.d_model', 128),
+                                        nhead=self.config.get('models.transformer.nhead', 8),
+                                        num_layers=self.config.get('models.transformer.num_layers', 4),
+                                        dim_feedforward=self.config.get('models.transformer.dim_feedforward', 512),
+                                        dropout=self.config.get('models.transformer.dropout', 0.1),
+                                        learning_rate=self.config.get('models.transformer.learning_rate', 0.001)
+                                    )
+                                    transformer_trainer.train(X_seq_train, y_seq_train, epochs=dynamic_epochs, verbose=False)
+                                    transformer_pred_raw = transformer_trainer.predict(X_seq_test)
+                                    transformer_pred = float(transformer_pred_raw[0]) if hasattr(transformer_pred_raw, '__len__') else float(transformer_pred_raw)
+                                    ensemble_predictions.append(transformer_pred)
+                                    default_weights.append(transformer_weight)
+                                    trained_models['transformer'] = transformer_trainer
+                                    self.logger.debug(f"{ticker}: Transformer prediction = {transformer_pred*100:+.2f}%")
+                                except Exception as e:
+                                    self.logger.warning(f"{ticker}: Transformer failed - {e}")
+                                    import traceback
+                                    self.logger.debug(f"Transformer traceback: {traceback.format_exc()}")
 
                     # Combine predictions with weights
                     if ensemble_predictions:

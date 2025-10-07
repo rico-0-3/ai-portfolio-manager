@@ -1,4 +1,6 @@
 - pre allenare modello
 - Testare con modello pre allenato
+- pre allenare anche gli altri modelli, non solo 1, in modo da averli tutti (modificare anche che se ha pretrained li prende tutti e non solo 1)
+- Testare con modelli pre allenato
 - Sistemare return e tutto
 - Automatizzare il tutto
