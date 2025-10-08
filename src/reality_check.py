@@ -73,6 +73,12 @@ class RealityCheck:
         adjusted = {}
 
         for ticker, pred in predictions.items():
+            # Handle dict format (old multi-horizon) vs float format (new 1m only)
+            if isinstance(pred, dict):
+                # Old format: {'1d': x, '1w': y, ...} - skip RealityCheck
+                adjusted[ticker] = pred
+                continue
+
             if use_ml:
                 # ML predictions are already realistic - trust the model!
                 # No degradation: ML is trained with validation and already accounts for:

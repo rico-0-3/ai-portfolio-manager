@@ -201,7 +201,7 @@ class PortfolioOrchestrator:
             # Transaction costs are already considered in real trading (spread/slippage)
             # ML model learns from actual historical data which includes these costs
             # So we don't apply them again to avoid double-counting
-            adjusted_return = metrics['annual_return']
+            adjusted_return = metrics.get('monthly_return', metrics.get('annual_return', 0))
 
             # Validate Sharpe ratio
             n_observations = len(returns_df)
@@ -234,7 +234,7 @@ class PortfolioOrchestrator:
             )
 
             # Update metrics with adjusted values
-            metrics['annual_return'] = adjusted_return
+            metrics['monthly_return'] = adjusted_return
             metrics['sharpe_ratio'] = adjusted_sharpe
             metrics['reality_check'] = {
                 'confidence_pct': confidence_pct,
@@ -492,21 +492,31 @@ class PortfolioOrchestrator:
                     # 1. XGBoost
                     try:
                         if has_pretrained:
-                            # Load pretrained model (1m horizon only)
+                            # Load pretrained models (XGBoost + LightGBM for 1m horizon)
                             import pickle
                             import xgboost as xgb
-                            self.logger.debug(f"{ticker}: Loading pretrained model (1m horizon)...")
+                            import lightgbm as lgb
+                            self.logger.debug(f"{ticker}: Loading pretrained models (1m horizon)...")
 
-                            # Load single model
-                            model_path = pretrained_dir / "model.pkl"
-                            with open(model_path, 'rb') as f:
-                                model_1m = pickle.load(f)
+                            pretrained_models = {}
+
+                            # Try to load all available models
+                            for model_name in ['xgboost', 'lightgbm']:
+                                model_path = pretrained_dir / f"{model_name}.pkl"
+                                if model_path.exists():
+                                    with open(model_path, 'rb') as f:
+                                        pretrained_models[model_name] = pickle.load(f)
+                                    self.logger.debug(f"{ticker}:   Loaded {model_name}.pkl")
 
                             # Load scaler and features
                             with open(pretrained_dir / "scaler.pkl", 'rb') as f:
                                 scaler = pickle.load(f)
                             with open(pretrained_dir / "features.pkl", 'rb') as f:
                                 selected_features = pickle.load(f)
+
+                            if not pretrained_models:
+                                self.logger.warning(f"{ticker}: No pretrained models found, training from scratch")
+                                has_pretrained = False
 
                             # Select only the features that were used during training
                             # IMPORTANT: Maintain the same order as in selected_features
@@ -535,11 +545,11 @@ class PortfolioOrchestrator:
 
                                 # Quick fine-tuning with xgb.train()
                                 dtrain_finetune = xgb.DMatrix(X_finetune_scaled[:-1], label=y_finetune[:-1])
-                                bst = xgb.train(
+                                model_1m = xgb.train(
                                     {'objective': 'reg:squarederror'},
                                     dtrain_finetune,
                                     num_boost_round=10,  # Quick fine-tuning
-                                    xgb_model=bst  # Continue from pretrained
+                                    xgb_model=model_1m  # Continue from pretrained
                                 )
 
                             # Select features and scale test data for prediction
@@ -763,9 +773,9 @@ class PortfolioOrchestrator:
                         weights_array = weights_array / (weights_array.sum() + 1e-8)  # Normalize
                         final_pred = np.average(ensemble_predictions, weights=weights_array)
 
-                        # Store as 1d prediction if not using pretrained (pretrained already stored all horizons)
-                        if ticker not in predictions or not isinstance(predictions.get(ticker), dict):
-                            predictions[ticker] = {'1d': float(final_pred)}
+                        # Store as float (1m prediction)
+                        if ticker not in predictions:
+                            predictions[ticker] = float(final_pred)
 
                         # Show model contributions
                         model_names = []
@@ -784,16 +794,12 @@ class PortfolioOrchestrator:
                         if len(ensemble_predictions) >= 7:
                             model_names.append('Transformer')
 
-                        # Log 1d prediction (or 1y if available from pretrained)
-                        pred_1d = predictions[ticker].get('1d', final_pred)
-                        pred_1y = predictions[ticker].get('1y', None)
-                        log_msg = f"{ticker}: Predicted return 1d={pred_1d*100:+.2f}%"
-                        if pred_1y is not None:
-                            log_msg += f", 1y={pred_1y*100:+.2f}%"
+                        # Log prediction
+                        log_msg = f"{ticker}: Predicted return 1m={predictions[ticker]*100:+.2f}%"
                         log_msg += f" (ensemble: {len(ensemble_predictions)} models: {', '.join(model_names)})"
                         self.logger.info(log_msg)
                     else:
-                        predictions[ticker] = {'1d': 0.0}
+                        predictions[ticker] = 0.0
                         self.logger.warning(f"{ticker}: No models succeeded, using 0.0")
 
                 except Exception as e:
@@ -1236,41 +1242,6 @@ class PortfolioOrchestrator:
         monthly_return = metrics.get('monthly_return', 0)
 
         print(f"  1 Month:    {monthly_return*100:+6.2f}%  (ML model - 1m horizon)")
-
-        # Confidence metrics
-        print("\nCONFIDENCE & RISK METRICS:")
-        print("-"*80)
-        sharpe = metrics['sharpe_ratio']
-        sortino = metrics['sortino_ratio']
-        volatility = metrics['annual_volatility']
-        max_drawdown = metrics['max_drawdown']
-        risk = results['risk_metrics']
-
-        # Use RealityCheck confidence if available
-        if 'reality_check' in metrics:
-            rc = metrics['reality_check']
-            confidence_pct = rc['confidence_pct']
-            confidence = rc['confidence_level']
-            print(f"  Confidence:       {confidence} ({confidence_pct:.0f}%)")
-        else:
-            # Fallback calculation
-            if sharpe > 1.0:
-                confidence = "HIGH"
-                confidence_pct = min(85 + (sharpe - 1.0) * 10, 95)
-            elif sharpe > 0.5:
-                confidence = "MEDIUM"
-                confidence_pct = 65 + (sharpe - 0.5) * 40
-            else:
-                confidence = "LOW"
-                confidence_pct = 40 + sharpe * 50
-            print(f"  Confidence:       {confidence} ({confidence_pct:.0f}%)")
-
-        print(f"  Sharpe Ratio:     {sharpe:.2f}")
-        print(f"  Sortino Ratio:    {sortino:.2f}")
-        print(f"  Volatility:       {volatility*100:.2f}%")
-        print(f"  Max Drawdown:     {max_drawdown*100:.2f}%")
-        print(f"  VaR (95%):        {risk['var_95']*100:.2f}%")
-        print(f"  CVaR (95%):       {risk['cvar_95']*100:.2f}%")
 
         # Estimated portfolio value (1 month projection)
         print("\nESTIMATED PORTFOLIO VALUE (1 MONTH):")

@@ -458,93 +458,130 @@ def train_advanced_model(
 
         logger.info(f"✓ Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
-        # 8. Train single XGBoost model for 1m horizon
-        logger.info(f"🤖 Step 8/10: Training XGBoost model for 1m horizon...")
+        # 8. Train ALL models for ensemble (1m horizon)
+        logger.info(f"🤖 Step 8/10: Training ensemble models for 1m horizon...")
 
         import xgboost as xgb
+        import lightgbm as lgb
+
+        trained_models = {}
+        all_metrics = {}
+
+        # Determine device
+        use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
+
+        # ================== 1. XGBoost ==================
+        logger.info(f"  [1/6] Training XGBoost...")
 
         # Optimize hyperparameters
         if optimize_hp:
-            logger.info(f"  Optimizing hyperparameters...")
-            best_params = optimize_xgboost_hyperparameters(
+            logger.info(f"    Optimizing hyperparameters...")
+            best_params_xgb = optimize_xgboost_hyperparameters(
                 X_train, y_train, X_val, y_val, n_trials=50
             )
         else:
-            best_params = {
+            best_params_xgb = {
                 'n_estimators': 500,
                 'max_depth': 7,
                 'learning_rate': 0.05
             }
 
-        # Determine device and optimize for GPU
-        use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
-
-        # Base XGBoost parameters
-        base_xgb_params = {
-            **best_params,
+        # XGBoost parameters
+        xgb_params = {
+            **best_params_xgb,
             'objective': 'reg:squarederror',
             'eval_metric': 'mae',
-            'tree_method': 'hist',  # GPU-accelerated histogram method
+            'tree_method': 'hist',
             'device': 'cuda' if use_gpu else 'cpu'
         }
 
-        # GPU-specific optimizations
         if use_gpu:
-            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            base_xgb_params['max_bin'] = 512 if gpu_memory_gb > 12 else 256
-            base_xgb_params['grow_policy'] = 'depthwise'
-            logger.info(f"  🚀 GPU optimized: max_bin={base_xgb_params['max_bin']}")
+            xgb_params['max_bin'] = 1024
+            xgb_params['grow_policy'] = 'depthwise'
+            xgb_params['max_leaves'] = 255
+            xgb_params['subsample'] = 0.8
+            xgb_params['colsample_bytree'] = 0.8
+            if xgb_params.get('n_estimators', 500) < 1000:
+                xgb_params['n_estimators'] = 1000
 
-        # Train single model for 1m horizon
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dval = xgb.DMatrix(X_val, label=y_val)
         dtest = xgb.DMatrix(X_test, label=y_test)
 
-        evals = [(dtrain, 'train'), (dval, 'val')]
-        model = xgb.train(
-            base_xgb_params,
-            dtrain,
-            num_boost_round=best_params.get('n_estimators', 500),
-            evals=evals,
+        xgb_model = xgb.train(
+            xgb_params, dtrain,
+            num_boost_round=xgb_params.get('n_estimators', 500),
+            evals=[(dtrain, 'train'), (dval, 'val')],
             early_stopping_rounds=50,
             verbose_eval=False
         )
 
-        # Validate
-        val_pred = model.predict(dval)
-        test_pred = model.predict(dtest)
+        xgb_pred = xgb_model.predict(dtest)
+        xgb_mae = np.mean(np.abs(xgb_pred - y_test))
+        xgb_acc = np.mean(np.sign(xgb_pred) == np.sign(y_test))
 
-        val_mae = np.mean(np.abs(val_pred - y_val))
-        test_mae = np.mean(np.abs(test_pred - y_test))
-        val_dir_acc = np.mean(np.sign(val_pred) == np.sign(y_val))
-        test_dir_acc = np.mean(np.sign(test_pred) == np.sign(y_test))
+        trained_models['xgboost'] = xgb_model
+        all_metrics['xgboost'] = {'test_mae': xgb_mae, 'test_dir_acc': xgb_acc}
+        logger.info(f"    ✓ XGBoost: MAE={xgb_mae:.6f}, Acc={xgb_acc:.2%}")
 
-        metrics = {
-            'val_mae': float(val_mae),
-            'test_mae': float(test_mae),
-            'val_dir_acc': float(val_dir_acc),
-            'test_dir_acc': float(test_dir_acc)
+        # ================== 2. LightGBM ==================
+        logger.info(f"  [2/6] Training LightGBM...")
+
+        lgb_params = {
+            'objective': 'regression',
+            'metric': 'mae',
+            'num_leaves': 31,
+            'learning_rate': 0.05,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
+            'bagging_freq': 5,
+            'verbose': -1,
+            'device': 'gpu' if use_gpu else 'cpu'
         }
 
-        logger.info(f"  ✓ 1m: Val MAE={val_mae:.6f}, Test MAE={test_mae:.6f}, Dir Acc={test_dir_acc:.2%}")
+        lgb_train = lgb.Dataset(X_train, label=y_train)
+        lgb_val = lgb.Dataset(X_val, label=y_val, reference=lgb_train)
 
-        # Get feature importance
-        importance_dict = model.get_score(importance_type='gain')
-        logger.info(f"✓ Model trained successfully")
+        lgb_model = lgb.train(
+            lgb_params, lgb_train,
+            num_boost_round=1000,
+            valid_sets=[lgb_val],
+            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]
+        )
+
+        lgb_pred = lgb_model.predict(X_test)
+        lgb_mae = np.mean(np.abs(lgb_pred - y_test))
+        lgb_acc = np.mean(np.sign(lgb_pred) == np.sign(y_test))
+
+        trained_models['lightgbm'] = lgb_model
+        all_metrics['lightgbm'] = {'test_mae': lgb_mae, 'test_dir_acc': lgb_acc}
+        logger.info(f"    ✓ LightGBM: MAE={lgb_mae:.6f}, Acc={lgb_acc:.2%}")
+
+        # ================== 3-6. Deep Learning Models (LSTM, GRU, LSTM+Attn, Transformer) ==================
+        # Skip for now - too heavy for Colab, will be added in phase 2
+        logger.info(f"  [3-6] Deep learning models skipped (Phase 2)")
+
+        # Aggregate metrics
+        metrics = {
+            'xgboost': all_metrics['xgboost'],
+            'lightgbm': all_metrics['lightgbm']
+        }
+
+        logger.info(f"✓ Ensemble trained: {len(trained_models)} models")
 
         # 9. Validation complete (already done above)
         logger.info(f"📊 Step 9/10: Validation complete")
 
-        # 10. Save model
-        logger.info(f"💾 Step 10/10: Saving model...")
+        # 10. Save all models
+        logger.info(f"💾 Step 10/10: Saving all models...")
 
         result = {
             'ticker': ticker,
-            'model': model,
+            'models': trained_models,
             'scaler': scaler,
             'selected_features': selected_features,
             'feature_importance': importance,
-            'best_params': best_params,
+            'best_params': best_params_xgb,
             'metrics': metrics
         }
 
@@ -552,9 +589,11 @@ def train_advanced_model(
             ticker_dir = save_dir / ticker
             ticker_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save model (single model for 1m)
-            with open(ticker_dir / 'model.pkl', 'wb') as f:
-                pickle.dump(model, f)
+            # Save all trained models
+            for model_name, model_obj in trained_models.items():
+                with open(ticker_dir / f'{model_name}.pkl', 'wb') as f:
+                    pickle.dump(model_obj, f)
+                logger.info(f"    ✓ Saved {model_name}.pkl")
 
             # Save scaler (shared across all models)
             with open(ticker_dir / 'scaler.pkl', 'wb') as f:
@@ -571,8 +610,9 @@ def train_advanced_model(
                 'n_samples': len(X_selected),
                 'n_features': len(selected_features),
                 'selected_features': selected_features,
-                'best_params': best_params,
+                'best_params': best_params_xgb,
                 'horizon': '1m',
+                'models': list(trained_models.keys()),
                 'metrics': metrics
             }
 
@@ -642,13 +682,17 @@ def main():
 
         # Auto-adjust parallel tickers based on GPU memory
         if use_parallel:
-            max_parallel = int(gpu_memory_gb / 4)  # ~4GB per ticker
+            # Each ticker uses ~1-1.5GB RAM during training
+            # We keep 2GB reserve for CUDA overhead
+            max_parallel = int((gpu_memory_gb - 2) / 1.5)
+
             if args.parallel_tickers > max_parallel:
                 logger.warning(f"⚠️  Reducing parallel tickers from {args.parallel_tickers} to {max_parallel} (GPU memory limit)")
                 args.parallel_tickers = max_parallel
 
             logger.info(f"🔥 Parallel mode: {args.parallel_tickers} tickers simultaneously")
-            logger.info(f"   Expected GPU saturation: ~{args.parallel_tickers * 30}% utilization")
+            logger.info(f"   Expected GPU memory: ~{args.parallel_tickers * 1.5:.1f}GB / {gpu_memory_gb:.1f}GB")
+            logger.info(f"   Expected GPU utilization: 80-95%")
 
     # Train
     logger.info(f"\n{'='*70}")

@@ -204,7 +204,7 @@ optimization:
   # Reality Check System (NEW!)
   # Applies conservative adjustments to prevent overly optimistic predictions
   reality_check:
-    enabled: true  # Enable reality checks
+    enabled: false  # Enable reality checks
     degradation_factor: 0.7  # Out-of-sample performance (70% of in-sample)
     slippage_factor: 0.0005  # 0.05% slippage per trade
     # Adjustments applied:

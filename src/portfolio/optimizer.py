@@ -85,10 +85,10 @@ class PortfolioOptimizer:
             return {returns.columns[0]: 1.0}
 
         logger.info(f"Running Markowitz optimization ({method})")
-        if ml_predictions:
-            logger.info(f"  ML predictions provided for {len(ml_predictions)} tickers: {list(ml_predictions.keys())}")
+        if ml_predictions and len(ml_predictions) > 0:
+            logger.info(f"  Using ML predictions (1m horizon) for {len(ml_predictions)} tickers")
         else:
-            logger.warning("  No ML predictions provided, will use historical returns")
+            logger.info("  Using historical returns (no ML predictions)")
 
         try:
             # Additional validation: ensure no NaN in returns
