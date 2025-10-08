@@ -121,6 +121,15 @@ def select_features_mutual_info(
     """
     logger.info(f"  Selecting top {top_k} features using mutual information...")
 
+    # Safety check: ensure no inf/nan in X or y
+    if not np.all(np.isfinite(X)):
+        logger.warning("  Found inf/nan in X before feature selection, clipping...")
+        X = np.nan_to_num(X, nan=0.0, posinf=1e10, neginf=-1e10)
+
+    if not np.all(np.isfinite(y)):
+        logger.warning("  Found inf/nan in y before feature selection, clipping...")
+        y = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
+
     # Calculate mutual information
     mi_scores = mutual_info_regression(X, y, random_state=42)
 
@@ -292,15 +301,11 @@ def optimize_xgboost_hyperparameters(
     )
 
     # Calculate optimal n_jobs based on GPU memory
-    # if use_gpu:
-    #     # T4 (15GB) can handle 3-4 parallel trials
-    #     # Smaller GPUs: 2 trials
-    #     n_jobs = 4 if torch.cuda.get_device_properties(0).total_memory > 12e9 else 2
-    #     logger.info(f"  Running {n_jobs} parallel trials to saturate GPU")
-    # else:
-    #     n_jobs = 1
-    if use_gpu: 
-        n_jobs = 100
+    if use_gpu:
+        # T4 (15GB) can handle 3-4 parallel trials
+        # Smaller GPUs: 2 trials
+        n_jobs = 4 if torch.cuda.get_device_properties(0).total_memory > 12e9 else 2
+        logger.info(f"  Running {n_jobs} parallel trials to saturate GPU")
     else:
         n_jobs = 1
 
@@ -391,11 +396,13 @@ def train_advanced_model(
         df = add_temporal_features(df)  # NEW: Temporal features
         df = create_target(df)  # Single target: 1 month
 
+        # Clean data: remove NaN and inf
+        df = df.replace([np.inf, -np.inf], np.nan)  # Replace inf with NaN
         df = df.dropna()
-        logger.info(f"✓ {len(df)} samples, {len(df.columns)} features")
+        logger.info(f"✓ {len(df)} samples after cleaning")
 
         if len(df) < 500:
-            logger.error(f"❌ Insufficient data after engineering")
+            logger.error(f"❌ Insufficient data after engineering ({len(df)} < 500)")
             return None
 
         # 3. Prepare features and targets
@@ -407,12 +414,16 @@ def train_advanced_model(
         X_raw = df[feature_cols].values
         y = df['target'].values
 
-        # Remove NaN targets
-        valid_mask = ~np.isnan(y)
+        # Additional safety check: remove any remaining NaN or inf
+        valid_mask = np.isfinite(y) & np.all(np.isfinite(X_raw), axis=1)
         X_raw = X_raw[valid_mask]
         y = y[valid_mask]
 
-        logger.info(f"✓ {len(X_raw)} valid samples")
+        logger.info(f"✓ {len(X_raw)} valid samples (no NaN/inf)")
+
+        if len(X_raw) < 500:
+            logger.error(f"❌ Insufficient valid data ({len(X_raw)} < 500)")
+            return None
 
         # 4. Remove outliers
         logger.info(f"🧹 Step 4/10: Removing outliers...")
@@ -629,15 +640,15 @@ def main():
         gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory_gb:.1f} GB)")
 
-    #     # Auto-adjust parallel tickers based on GPU memory
-    #     if use_parallel:
-    #         max_parallel = int(gpu_memory_gb / 4)  # ~4GB per ticker
-    #         if args.parallel_tickers > max_parallel:
-    #             logger.warning(f"⚠️  Reducing parallel tickers from {args.parallel_tickers} to {max_parallel} (GPU memory limit)")
-    #             args.parallel_tickers = max_parallel
+        # Auto-adjust parallel tickers based on GPU memory
+        if use_parallel:
+            max_parallel = int(gpu_memory_gb / 4)  # ~4GB per ticker
+            if args.parallel_tickers > max_parallel:
+                logger.warning(f"⚠️  Reducing parallel tickers from {args.parallel_tickers} to {max_parallel} (GPU memory limit)")
+                args.parallel_tickers = max_parallel
 
-    #         logger.info(f"🔥 Parallel mode: {args.parallel_tickers} tickers simultaneously")
-    #         logger.info(f"   Expected GPU saturation: ~{args.parallel_tickers * 30}% utilization")
+            logger.info(f"🔥 Parallel mode: {args.parallel_tickers} tickers simultaneously")
+            logger.info(f"   Expected GPU saturation: ~{args.parallel_tickers * 30}% utilization")
 
     # Train
     logger.info(f"\n{'='*70}")
