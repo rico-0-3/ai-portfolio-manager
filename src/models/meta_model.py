@@ -117,13 +117,37 @@ class MetaModel:
         else:
             optimizer_weights = self.portfolio_optimizer_config
 
-        # Import optimization methods
-        from src.portfolio.optimizer import (
-            optimize_portfolio_markowitz,
-            optimize_portfolio_black_litterman,
-            optimize_portfolio_risk_parity,
-            optimize_portfolio_cvar
-        )
+        # TEMPORARY FIX: Use PortfolioOptimizer class instead of standalone functions
+        from src.portfolio.optimizer import PortfolioOptimizer
+        
+        try:
+            optimizer = PortfolioOptimizer()
+            
+            # Convert predictions to expected return format
+            expected_returns = pd.Series(predictions)
+            
+            # Calculate optimal weights
+            weights = optimizer.optimize_portfolio(
+                expected_returns=expected_returns,
+                returns_df=historical_returns,
+                method='markowitz'  # Use default method for now
+            )
+            
+            return weights
+            
+        except Exception as e:
+            logger.warning(f"Portfolio optimization failed: {e}, using equal weights")
+            # Fallback: equal weights
+            tickers = list(predictions.keys())
+            return {ticker: 1.0 / len(tickers) for ticker in tickers}
+
+        # OLD CODE (standalone functions don't exist):
+        # from src.portfolio.optimizer import (
+        #     optimize_portfolio_markowitz,
+        #     optimize_portfolio_black_litterman,
+        #     optimize_portfolio_risk_parity,
+        #     optimize_portfolio_cvar
+        # )
 
         # Calculate weights from each method
         method_weights = {}

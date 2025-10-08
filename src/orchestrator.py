@@ -20,6 +20,7 @@ from src.data.fmp_data import FMPDataFetcher
 from src.data.finnhub_data import FinnhubDataFetcher
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.feature_engineering import FeatureEngineer
+from src.features.advanced_feature_engineering import AdvancedFeatureEngineer
 from src.portfolio.optimizer import PortfolioOptimizer
 from src.portfolio.risk_manager import RiskManager
 from src.dynamic_weights import DynamicWeightCalibrator
@@ -146,11 +147,11 @@ class PortfolioOrchestrator:
         )
         self.logger.info(f"✓ Fetched data for {len(market_data)} tickers")
 
-        # Step 2: Feature engineering
+        # Step 2: Feature engineering (base features only)
         self.logger.info("\n[2/3] Engineering features...")
         fundamental_data, analyst_data = self._enrich_data(tickers)
         processed_data = self._engineer_features(market_data, fundamental_data, analyst_data)
-        self.logger.info(f"✓ Features ready")
+        self.logger.info(f"✓ Base features ready")
 
         # Step 3: Load MetaModel and predict
         self.logger.info("\n[3/3] Loading MetaModel...")
@@ -170,6 +171,11 @@ class PortfolioOrchestrator:
         meta_model = MetaModel.load(meta_model_dir)
         info = meta_model.get_model_info()
         self.logger.info(f"✓ MetaModel loaded: {info['num_tickers']} tickers, {len(info['portfolio_optimizer_config'])} optimization methods")
+        
+        # Add interaction features based on what the model expects
+        self.logger.info("  Adding interaction features based on trained models...")
+        processed_data = self._add_model_specific_features(processed_data, meta_model)
+        self.logger.info(f"✓ All features ready")
 
         # Calculate historical returns
         returns_df = pd.DataFrame({
@@ -295,7 +301,7 @@ class PortfolioOrchestrator:
                 'var_95': portfolio_var,
                 'cvar_95': portfolio_cvar
             },
-            'sentiment_scores': sentiment_scores,
+            'sentiment_scores': {},  # Sentiment analysis not currently used in MetaModel pipeline
             'predictions': predictions,
             'latest_prices': latest_prices,
             'budget': budget
@@ -337,6 +343,59 @@ class PortfolioOrchestrator:
 
         return fundamental_data, analyst_data
 
+    def _add_model_specific_features(
+        self,
+        processed_data: Dict[str, pd.DataFrame],
+        meta_model
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Add interaction features required by the trained model.
+        The model's selected_features may include interaction features (containing '_x_').
+        We need to create these from the base features.
+        """
+        for ticker, df in processed_data.items():
+            if ticker not in meta_model.prediction_models:
+                continue
+                
+            # Get the features expected by this ticker's model
+            model = meta_model.prediction_models[ticker]
+            expected_features = model.selected_features
+            
+            # Find interaction features (those with '_x_' in the name)
+            interaction_features_needed = [f for f in expected_features if '_x_' in f]
+            
+            if not interaction_features_needed:
+                continue
+            
+            # Create each interaction feature
+            for interaction_feat in interaction_features_needed:
+                if interaction_feat in df.columns:
+                    continue  # Already exists
+                    
+                # Parse interaction feature name (e.g., "ATR_x_Close_lag_5")
+                parts = interaction_feat.split('_x_')
+                if len(parts) != 2:
+                    self.logger.warning(f"{ticker}: Cannot parse interaction feature: {interaction_feat}")
+                    continue
+                
+                feat1, feat2 = parts[0], parts[1]
+                
+                # Check if both base features exist
+                if feat1 in df.columns and feat2 in df.columns:
+                    df[interaction_feat] = df[feat1] * df[feat2]
+                    self.logger.debug(f"{ticker}: Created interaction feature: {interaction_feat}")
+                else:
+                    missing = []
+                    if feat1 not in df.columns:
+                        missing.append(feat1)
+                    if feat2 not in df.columns:
+                        missing.append(feat2)
+                    self.logger.warning(f"{ticker}: Cannot create {interaction_feat}, missing: {missing}")
+            
+            processed_data[ticker] = df
+        
+        return processed_data
+
     def _engineer_features(
         self,
         market_data: Dict[str, pd.DataFrame],
@@ -345,16 +404,28 @@ class PortfolioOrchestrator:
     ) -> Dict[str, pd.DataFrame]:
         """Engineer features for all tickers, including fundamental and analyst data."""
         processed_data = {}
+        
+        # Initialize AdvancedFeatureEngineer (same as training)
+        adv_eng = AdvancedFeatureEngineer()
 
         for ticker, df in market_data.items():
             try:
-                # Add technical indicators
+                # Add technical indicators (EXACTLY as in training)
                 df = self.tech_indicators.add_all_indicators(df)
 
-                # Add custom features
-                df = self.feature_engineer.create_price_features(df)
-                df = self.feature_engineer.create_volume_features(df)
-                df = self.feature_engineer.create_volatility_features(df)
+                # Add detrending features (EXACTLY as in training)
+                df['trend_60d'] = df['Close'].rolling(60, min_periods=20).mean().shift(1)
+                df['distance_from_trend'] = (df['Close'] - df['trend_60d']) / (df['trend_60d'] + 1e-8)
+                df['trend_20d'] = df['Close'].rolling(20, min_periods=10).mean().shift(1)
+                df['distance_from_trend_20d'] = (df['Close'] - df['trend_20d']) / (df['trend_20d'] + 1e-8)
+                
+                # Add advanced features (EXACTLY as in training)
+                df = adv_eng.create_lag_features(df, lags=[1, 5, 21])
+                df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 60])
+                df = adv_eng.create_fourier_features(df, periods=[5, 10, 21, 252])
+                
+                # Clean data (EXACTLY as in training)
+                df = df.replace([np.inf, -np.inf], np.nan)
 
                 # Add fundamental data as constant features (same value for all rows)
                 fund_count = 0

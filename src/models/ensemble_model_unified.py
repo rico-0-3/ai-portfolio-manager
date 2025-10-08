@@ -84,11 +84,13 @@ class UnifiedEnsembleModel:
 
             try:
                 if model_name == 'xgboost':
-                    import xgboost as xgb
-                    dmatrix = xgb.DMatrix(X_scaled)
-                    pred = float(model.predict(dmatrix)[0])
+                    # XGBoost can predict directly from numpy array
+                    pred = float(model.predict(X_scaled)[0])
 
                 elif model_name == 'lightgbm':
+                    pred = float(model.predict(X_scaled)[0])
+                    
+                elif model_name == 'catboost':
                     pred = float(model.predict(X_scaled)[0])
 
                 # Future: LSTM, GRU, Transformer
