@@ -428,6 +428,8 @@ class PortfolioOrchestrator:
                 self.logger.info(f"Using only gradient boosting models: XGBoost({xgb_weight}), LightGBM({lgb_weight})")
 
             for ticker, df in processed_data.items():
+                # Always initialize ensemble_predictions to avoid UnboundLocalError
+                ensemble_predictions = []
                 try:
                     # Check for pretrained model
                     pretrained_dir = Path(f"data/models/pretrained_advanced/{ticker}")
