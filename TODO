@@ -1,5 +1,2 @@
-- finire di sistemare per preallenamento e usare tutti i modelli pretrainati. 
-- Fatti spiegar ecosa fa l'orchestrator in fila, con quali parametri e a cosa serve, poi pulire se necessario
-- Testare con modelli pre allenato
-- Sistemare return e tutto
-- Automatizzare il tutto
+- testa con modello attuale e poi testa con nuovo modello con pesi dinamici.
+Se non preciso carica la doc a chat o calude e chiedi migliorie

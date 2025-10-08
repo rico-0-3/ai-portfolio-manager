@@ -270,21 +270,30 @@ def adversarial_validation(X_train: np.ndarray, X_test: np.ndarray) -> float:
     return auc
 
 
-def select_features_rfe(X: np.ndarray, y: np.ndarray, feature_names: List[str], n_features: int = 40) -> Tuple[np.ndarray, List[str]]:
-    """Recursive Feature Elimination with XGBoost."""
-    logger.info(f"  RFE: {X.shape[1]} → {n_features} features...")
+def select_features_mutual_info(X: np.ndarray, y: np.ndarray, feature_names: List[str], n_features: int = 40) -> Tuple[np.ndarray, List[str]]:
+    """
+    OPTIMIZATION 2: Mutual Information feature selection.
+    Better than RFE for non-linear relationships (stock markets are highly non-linear!).
+    """
+    from sklearn.feature_selection import mutual_info_regression
 
-    # Use XGBoost as estimator
-    estimator = xgb.XGBRegressor(n_estimators=100, max_depth=3, random_state=42, n_jobs=-1)
+    logger.info(f"  Mutual Information: {X.shape[1]} → {n_features} features...")
 
-    # RFE
-    rfe = RFE(estimator=estimator, n_features_to_select=n_features, step=5)
-    X_selected = rfe.fit_transform(X, y)
+    # Calculate mutual information scores
+    mi_scores = mutual_info_regression(X, y, random_state=42, n_neighbors=5)
 
-    # Get selected feature names
-    selected_features = [feat for feat, selected in zip(feature_names, rfe.support_) if selected]
+    # Select top N features by MI score
+    top_indices = np.argsort(mi_scores)[-n_features:]
+    X_selected = X[:, top_indices]
+    selected_features = [feature_names[i] for i in top_indices]
 
-    logger.info(f"  ✓ RFE complete: {len(selected_features)} features selected")
+    # Log top 10 features for debugging
+    top_10_idx = np.argsort(mi_scores)[-10:]
+    logger.info(f"  Top 10 features by Mutual Information:")
+    for idx in reversed(top_10_idx):
+        logger.info(f"    {feature_names[idx]}: {mi_scores[idx]:.4f}")
+
+    logger.info(f"  ✓ Mutual Information complete: {len(selected_features)} features selected")
 
     return X_selected, selected_features
 
@@ -316,6 +325,58 @@ def select_features_boruta(X: np.ndarray, y: np.ndarray, feature_names: List[str
         return X, feature_names
 
 
+def adaptive_ensemble_weights(
+    base_predictions: np.ndarray,
+    y_true: np.ndarray,
+    temperature: float = 0.15,
+    window: int = 30
+) -> np.ndarray:
+    """
+    OPTIMIZATION 5: Adaptive Ensemble Weighting
+
+    Dynamically weights base models based on recent directional accuracy.
+    Models that perform better in recent window get higher weight.
+
+    Args:
+        base_predictions: (n_samples, n_models) predictions from level-1 models
+        y_true: (n_samples,) ground truth values
+        temperature: Softmax temperature (lower = more selective, higher = more uniform)
+        window: Rolling window for recent performance evaluation (days)
+
+    Returns:
+        weighted_predictions: (n_samples,) final weighted predictions
+    """
+    n_samples, n_models = base_predictions.shape
+    weighted_preds = np.zeros(n_samples)
+
+    for i in range(n_samples):
+        if i < window:
+            # Not enough history → use uniform weights
+            weights = np.ones(n_models) / n_models
+        else:
+            # Calculate directional accuracy for each model in recent window
+            recent_DA = []
+            for model_idx in range(n_models):
+                model_preds = base_predictions[i-window:i, model_idx]
+                true_vals = y_true[i-window:i]
+
+                # Directional accuracy (up/down prediction correctness)
+                pred_dir = (model_preds > 0).astype(int)
+                true_dir = (true_vals > 0).astype(int)
+                DA = (pred_dir == true_dir).mean()
+                recent_DA.append(DA)
+
+            # Softmax weighting (exponential of accuracy)
+            recent_DA = np.array(recent_DA)
+            weights = np.exp(recent_DA / temperature)
+            weights /= weights.sum()
+
+        # Weighted prediction
+        weighted_preds[i] = np.sum(base_predictions[i, :] * weights)
+
+    return weighted_preds
+
+
 def train_stacked_ensemble(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -327,7 +388,7 @@ def train_stacked_ensemble(
     """
     Train stacked ensemble:
     Level 1: XGBoost, LightGBM, CatBoost, LSTM, GRU, Transformer
-    Level 2: Meta-learner (XGBoost) on level-1 predictions
+    Level 2: Meta-learner (XGBoost) with adaptive weights
 
     Args:
         force_cpu: Force CPU usage for all models (required for parallel training)
@@ -354,13 +415,13 @@ def train_stacked_ensemble(
             colsample_bytree=0.8,
             tree_method='hist',
             device='cuda' if use_gpu_actual else 'cpu',
-            random_state=42
+            random_state=42,
+            early_stopping_rounds=50  # XGBoost 2.0+ API
         )
         xgb_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            verbose=False,
-            early_stopping_rounds=50
+            verbose=False
         )
         level1_models['xgboost'] = xgb_model
         level1_predictions_train.append(xgb_model.predict(X_train))
@@ -408,12 +469,13 @@ def train_stacked_ensemble(
     # TODO: LSTM, GRU, Transformer (Phase 2)
     # For now, focus on gradient boosting models
 
-    # ========== LEVEL 2: Meta-Learner ==========
+    # ========== LEVEL 2: Meta-Learner with Adaptive Weights ==========
     logger.info(f"    [Level 2] Training meta-learner on {len(level1_models)} level-1 predictions...")
 
     X_meta_train = np.column_stack(level1_predictions_train)
     X_meta_val = np.column_stack(level1_predictions_val)
 
+    # Standard meta-learner (XGBoost)
     meta_learner = xgb.XGBRegressor(
         n_estimators=100,
         max_depth=3,
@@ -422,16 +484,28 @@ def train_stacked_ensemble(
     )
     meta_learner.fit(X_meta_train, y_train, eval_set=[(X_meta_val, y_val)], verbose=False)
 
-    # Final predictions
-    final_predictions = meta_learner.predict(X_meta_val)
+    # OPTIMIZATION 5: Adaptive Ensemble Weighting
+    # Combine static meta-learner with dynamic weights based on recent performance
+    static_predictions = meta_learner.predict(X_meta_val)
+    adaptive_predictions = adaptive_ensemble_weights(
+        base_predictions=X_meta_val,
+        y_true=y_val,
+        temperature=0.15,
+        window=30
+    )
 
-    # Metrics
+    # Blend: 70% adaptive + 30% static (meta-learner has global knowledge)
+    final_predictions = 0.7 * adaptive_predictions + 0.3 * static_predictions
+
+    # Metrics - Compare static vs adaptive vs blended
+    static_dir_acc = ((static_predictions > 0).astype(int) == (y_val > 0).astype(int)).mean()
+    adaptive_dir_acc = ((adaptive_predictions > 0).astype(int) == (y_val > 0).astype(int)).mean()
+
     mae = mean_absolute_error(y_val, final_predictions)
     rmse = np.sqrt(mean_squared_error(y_val, final_predictions))
     r2 = r2_score(y_val, final_predictions)
 
     # CRITICAL: Directional Accuracy (most important for stock prediction!)
-    # Predice correttamente se salirà o scenderà?
     predicted_direction = (final_predictions > 0).astype(int)
     actual_direction = (y_val > 0).astype(int)
     directional_accuracy = (predicted_direction == actual_direction).mean()
@@ -439,6 +513,9 @@ def train_stacked_ensemble(
     logger.info(f"    ✓ Stacked Ensemble Metrics:")
     logger.info(f"       MAE: {mae:.6f} | RMSE: {rmse:.6f} | R²: {r2:.4f}")
     logger.info(f"       Directional Accuracy: {directional_accuracy*100:.2f}% (MOST IMPORTANT!)")
+    logger.info(f"       - Static meta-learner: {static_dir_acc*100:.2f}%")
+    logger.info(f"       - Adaptive weighting: {adaptive_dir_acc*100:.2f}%")
+    logger.info(f"       - Blended (70/30): {directional_accuracy*100:.2f}%")
 
     return {
         'level1_models': level1_models,
@@ -496,6 +573,8 @@ def optimize_hyperparameters_multiobjective(
                 'random_state': 42
             }
 
+            # Add early stopping to params (XGBoost 2.0+ API)
+            params['early_stopping_rounds'] = 50
             model = xgb.XGBRegressor(**params)
 
             # Measure training time
@@ -506,8 +585,7 @@ def optimize_hyperparameters_multiobjective(
             model.fit(
                 X_train, y_train,
                 eval_set=[(X_val, y_val)],
-                verbose=False,
-                early_stopping_rounds=50  # Stop if no improvement for 50 rounds
+                verbose=False
             )
 
             training_time = time.time() - start_time
@@ -535,26 +613,40 @@ def optimize_hyperparameters_multiobjective(
             # Convert to loss (we minimize, so 1 - accuracy)
             directional_loss = 1.0 - directional_accuracy
 
-            # Objective 3: Diversity - correlation with simple baseline (maximize decorrelation)
+            # Objective 3: OPTIMIZATION 4 - Enhanced Diversity (maximize decorrelation)
+            # Penalize models that are too similar to baseline AND to each other
             baseline_pred = np.full_like(y_pred, y_train.mean())
-            correlation = np.corrcoef(y_pred, baseline_pred)[0, 1]
+            correlation_baseline = np.corrcoef(y_pred, baseline_pred)[0, 1]
+
+            # Also check correlation with validation target (overfitting indicator)
+            correlation_target = np.corrcoef(y_pred, y_val)[0, 1]
 
             # Handle constant predictions (correlation = NaN)
-            if np.isnan(correlation):
-                diversity_score = 0.0
+            if np.isnan(correlation_baseline):
+                diversity_score_baseline = 0.0
             else:
-                diversity_score = 1 - abs(correlation)  # Higher is better
+                diversity_score_baseline = 1 - abs(correlation_baseline)
+
+            # Penalize if TOO correlated with target (overfitting)
+            if np.isnan(correlation_target):
+                overfitting_penalty = 0.0
+            else:
+                # Perfect correlation (1.0) should be penalized (memorization)
+                # Optimal is ~0.3-0.6 (predictive but not memorizing)
+                overfitting_penalty = max(0, abs(correlation_target) - 0.6) * 0.5
+
+            diversity_score = diversity_score_baseline - overfitting_penalty
 
             # Objective 4: Speed (minimize training time)
             # Normalize to 0-1 range (assume max 60 seconds)
             speed_score = min(training_time / 60.0, 1.0)
 
-            # Combined score (weighted)
-            # Directional Accuracy: 50% (MOST IMPORTANT!)
-            # MAE: 30% (secondary importance)
-            # Diversity: 15%
+            # Combined score (weighted) - OPTIMIZATION 4: Increased diversity weight
+            # Directional Accuracy: 45% (MOST IMPORTANT!)
+            # MAE: 25% (secondary)
+            # Diversity: 25% (INCREASED - prevents overfitting ensemble)
             # Speed: 5%
-            combined_score = (0.50 * directional_loss) + (0.30 * mae) + (0.15 * (1 - diversity_score)) + (0.05 * speed_score)
+            combined_score = (0.45 * directional_loss) + (0.25 * mae) + (0.25 * (1 - diversity_score)) + (0.05 * speed_score)
 
             # Final check: ensure combined_score is valid
             if np.isnan(combined_score) or np.isinf(combined_score):
@@ -635,6 +727,15 @@ def train_perfect_model(
         tech_ind = TechnicalIndicators()
         df = tech_ind.add_all_indicators(df)
 
+        # OPTIMIZATION 0: Detrending (reduces long-term drift)
+        # Use 60-day (3-month) trend instead of 252-day to stay responsive
+        df['trend_60d'] = df['Close'].rolling(60, min_periods=20).mean().shift(1)  # No look-ahead
+        df['distance_from_trend'] = (df['Close'] - df['trend_60d']) / (df['trend_60d'] + 1e-8)
+
+        # Also add shorter trends for multi-scale analysis
+        df['trend_20d'] = df['Close'].rolling(20, min_periods=10).mean().shift(1)
+        df['distance_from_trend_20d'] = (df['Close'] - df['trend_20d']) / (df['trend_20d'] + 1e-8)
+
         # Advanced features
         adv_eng = AdvancedFeatureEngineer()
         df = adv_eng.create_lag_features(df, lags=[1, 5, 21])
@@ -652,6 +753,23 @@ def train_perfect_model(
         # Target = (Price in 5 days - Price today) / Price today
         df['target'] = (df['Close'].shift(-5) - df['Close']) / df['Close']
 
+        # OPTIMIZATION 1: Clip extreme outliers (±3 std)
+        # Prevents overfitting on extreme events (crashes, pumps)
+        target_mean = df['target'].mean()
+        target_std = df['target'].std()
+        target_lower = target_mean - 3 * target_std
+        target_upper = target_mean + 3 * target_std
+
+        logger.info(f"  Target statistics BEFORE clipping:")
+        logger.info(f"    Mean: {target_mean:.4f}, Std: {target_std:.4f}")
+        logger.info(f"    Min: {df['target'].min():.4f}, Max: {df['target'].max():.4f}")
+
+        df['target'] = df['target'].clip(lower=target_lower, upper=target_upper)
+
+        logger.info(f"  Target statistics AFTER clipping (±3σ):")
+        logger.info(f"    Min: {df['target'].min():.4f}, Max: {df['target'].max():.4f}")
+        logger.info(f"    Clipped range: [{target_lower:.4f}, {target_upper:.4f}]")
+
         # Also create directional target for validation metrics
         df['target_direction'] = (df['target'] > 0).astype(int)
 
@@ -668,11 +786,11 @@ def train_perfect_model(
         logger.info(f"  ✓ Initial features: {len(feature_names)}")
 
         # ========== FEATURE SELECTION ==========
-        logger.info(f"  🎯 Step 3/7: Feature selection (RFE + Interactions)...")
-        # OPTIMIZATION: Reduce to 40 features to prevent overfitting
-        # More features = more overfitting on financial data
+        logger.info(f"  🎯 Step 3/7: Feature selection (Mutual Info + Interactions)...")
+        # OPTIMIZATION 2: Use Mutual Information instead of RFE
+        # MI captures non-linear relationships better (crucial for stock markets!)
         if len(feature_names) > 40:
-            X_raw, feature_names = select_features_rfe(X_raw, y, feature_names, n_features=40)
+            X_raw, feature_names = select_features_mutual_info(X_raw, y, feature_names, n_features=40)
 
         # Step 2: Create MINIMAL interaction features (top 5 only)
         # Interactions can help but too many cause overfitting
@@ -681,7 +799,9 @@ def train_perfect_model(
         logger.info(f"  ✓ Final features after selection: {len(feature_names)}")
 
         # ========== TRAIN/VAL SPLIT (TimeSeriesSplit with purging) ==========
-        splits = purged_time_series_split(n_samples=len(X_raw), n_splits=5, embargo_pct=0.02)
+        # OPTIMIZATION 3: Increase splits from 5 → 10 for more robust validation
+        # More splits = less overfitting, more realistic out-of-sample performance
+        splits = purged_time_series_split(n_samples=len(X_raw), n_splits=10, embargo_pct=0.02)
 
         # Use last split for validation
         train_idx, val_idx = splits[-1]
