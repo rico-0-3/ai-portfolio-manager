@@ -161,18 +161,13 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def create_multi_horizon_targets(df: pd.DataFrame) -> pd.DataFrame:
+def create_target(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Create multiple prediction horizons:
-    - 1 day (short-term)
-    - 5 days (weekly)
-    - 21 days (monthly)
+    Create single prediction target: 1 month (21 trading days).
     """
-    logger.info("  Creating multi-horizon targets...")
+    logger.info("  Creating 1-month target...")
 
-    df['target_1d'] = df['Close'].pct_change().shift(-1)  # Next day
-    df['target_5d'] = df['Close'].pct_change(5).shift(-5)  # Next week
-    df['target_21d'] = df['Close'].pct_change(21).shift(-21)  # Next month
+    df['target'] = df['Close'].pct_change(21).shift(-21)  # Next month (21 trading days)
 
     return df
 
@@ -390,7 +385,7 @@ def train_advanced_model(
         df = feature_engineer.create_volume_features(df)
         df = feature_engineer.create_volatility_features(df)
         df = add_temporal_features(df)  # NEW: Temporal features
-        df = create_multi_horizon_targets(df)  # NEW: Multi-horizon
+        df = create_target(df)  # Single target: 1 month
 
         df = df.dropna()
         logger.info(f"✓ {len(df)} samples, {len(df.columns)} features")
@@ -403,26 +398,21 @@ def train_advanced_model(
         logger.info(f"🎯 Step 3/10: Preparing features...")
 
         feature_cols = [col for col in df.columns
-                       if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close',
-                                     'target_1d', 'target_5d', 'target_21d']]
+                       if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target']]
 
         X_raw = df[feature_cols].values
-        y_1d = df['target_1d'].values
-        y_5d = df['target_5d'].values
-        y_21d = df['target_21d'].values
+        y = df['target'].values
 
         # Remove NaN targets
-        valid_mask = ~(np.isnan(y_1d) | np.isnan(y_5d) | np.isnan(y_21d))
+        valid_mask = ~np.isnan(y)
         X_raw = X_raw[valid_mask]
-        y_1d = y_1d[valid_mask]
-        y_5d = y_5d[valid_mask]
-        y_21d = y_21d[valid_mask]
+        y = y[valid_mask]
 
         logger.info(f"✓ {len(X_raw)} valid samples")
 
         # 4. Remove outliers
         logger.info(f"🧹 Step 4/10: Removing outliers...")
-        X_clean, y_clean = remove_outliers(X_raw, y_1d, threshold=3.0)
+        X_clean, y_clean = remove_outliers(X_raw, y, threshold=3.0)
 
         # 5. Feature selection
         logger.info(f"🎨 Step 5/10: Feature selection...")
@@ -439,6 +429,7 @@ def train_advanced_model(
         X_val_raw = X_selected[train_split:val_split]
         X_test_raw = X_selected[val_split:]
 
+        # Split target
         y_train = y_clean[:train_split]
         y_val = y_clean[train_split:val_split]
         y_test = y_clean[val_split:]
@@ -452,10 +443,14 @@ def train_advanced_model(
 
         logger.info(f"✓ Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
-        # 8. Train XGBoost with optimization
-        logger.info(f"🤖 Step 8/10: Training XGBoost...")
+        # 8. Train single XGBoost model for 1m horizon
+        logger.info(f"🤖 Step 8/10: Training XGBoost model for 1m horizon...")
 
+        import xgboost as xgb
+
+        # Optimize hyperparameters
         if optimize_hp:
+            logger.info(f"  Optimizing hyperparameters...")
             best_params = optimize_xgboost_hyperparameters(
                 X_train, y_train, X_val, y_val, n_trials=50
             )
@@ -466,17 +461,11 @@ def train_advanced_model(
                 'learning_rate': 0.05
             }
 
-        xgb_model = XGBoostPredictor(**best_params)
-
-        # Train with early stopping
-        import xgboost as xgb
-        dtrain = xgb.DMatrix(X_train, label=y_train)
-        dval = xgb.DMatrix(X_val, label=y_val)
-
         # Determine device and optimize for GPU
         use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
 
-        xgb_params = {
+        # Base XGBoost parameters
+        base_xgb_params = {
             **best_params,
             'objective': 'reg:squarederror',
             'eval_metric': 'mae',
@@ -487,18 +476,18 @@ def train_advanced_model(
         # GPU-specific optimizations
         if use_gpu:
             gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            # Increase max_bin for larger GPUs (more GPU work)
-            xgb_params['max_bin'] = 512 if gpu_memory_gb > 12 else 256
-            # Grow policy for better GPU utilization
-            xgb_params['grow_policy'] = 'depthwise'  # Better for GPU
-            logger.info(f"  🚀 GPU optimized: max_bin={xgb_params['max_bin']}")
+            base_xgb_params['max_bin'] = 512 if gpu_memory_gb > 12 else 256
+            base_xgb_params['grow_policy'] = 'depthwise'
+            logger.info(f"  🚀 GPU optimized: max_bin={base_xgb_params['max_bin']}")
 
-        if xgb_params['device'] == 'cuda':
-            logger.info(f"  🚀 Using GPU acceleration")
+        # Train single model for 1m horizon
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval = xgb.DMatrix(X_val, label=y_val)
+        dtest = xgb.DMatrix(X_test, label=y_test)
 
         evals = [(dtrain, 'train'), (dval, 'val')]
-        bst = xgb.train(
-            xgb_params,
+        model = xgb.train(
+            base_xgb_params,
             dtrain,
             num_boost_round=best_params.get('n_estimators', 500),
             evals=evals,
@@ -506,56 +495,57 @@ def train_advanced_model(
             verbose_eval=False
         )
 
-        xgb_model.model = bst
-
-        # Get feature importance
-        importance_dict = bst.get_score(importance_type='gain')
-        logger.info(f"✓ XGBoost trained (best iteration: {bst.best_iteration})")
-
-        # 9. Validate
-        logger.info(f"📊 Step 9/10: Validation...")
-
-        dtest = xgb.DMatrix(X_test)
-        dval_pred = xgb.DMatrix(X_val)
-
-        val_pred = bst.predict(dval_pred)
-        test_pred = bst.predict(dtest)
+        # Validate
+        val_pred = model.predict(dval)
+        test_pred = model.predict(dtest)
 
         val_mae = np.mean(np.abs(val_pred - y_val))
         test_mae = np.mean(np.abs(test_pred - y_test))
         val_dir_acc = np.mean(np.sign(val_pred) == np.sign(y_val))
         test_dir_acc = np.mean(np.sign(test_pred) == np.sign(y_test))
 
-        logger.info(f"✓ Val MAE: {val_mae:.6f}, Test MAE: {test_mae:.6f}")
-        logger.info(f"✓ Val Dir Acc: {val_dir_acc:.2%}, Test Dir Acc: {test_dir_acc:.2%}")
+        metrics = {
+            'val_mae': float(val_mae),
+            'test_mae': float(test_mae),
+            'val_dir_acc': float(val_dir_acc),
+            'test_dir_acc': float(test_dir_acc)
+        }
 
-        # 10. Save
-        logger.info(f"💾 Step 10/10: Saving...")
+        logger.info(f"  ✓ 1m: Val MAE={val_mae:.6f}, Test MAE={test_mae:.6f}, Dir Acc={test_dir_acc:.2%}")
+
+        # Get feature importance
+        importance_dict = model.get_score(importance_type='gain')
+        logger.info(f"✓ Model trained successfully")
+
+        # 9. Validation complete (already done above)
+        logger.info(f"📊 Step 9/10: Validation complete")
+
+        # 10. Save model
+        logger.info(f"💾 Step 10/10: Saving model...")
 
         result = {
             'ticker': ticker,
-            'model': bst,
+            'model': model,
             'scaler': scaler,
             'selected_features': selected_features,
             'feature_importance': importance,
             'best_params': best_params,
-            'metrics': {
-                'val_mae': float(val_mae),
-                'test_mae': float(test_mae),
-                'val_dir_acc': float(val_dir_acc),
-                'test_dir_acc': float(test_dir_acc)
-            }
+            'metrics': metrics
         }
 
         if save_dir:
             ticker_dir = save_dir / ticker
             ticker_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save everything
+            # Save model (single model for 1m)
             with open(ticker_dir / 'model.pkl', 'wb') as f:
-                pickle.dump(bst, f)
+                pickle.dump(model, f)
+
+            # Save scaler (shared across all models)
             with open(ticker_dir / 'scaler.pkl', 'wb') as f:
                 pickle.dump(scaler, f)
+
+            # Save selected features
             with open(ticker_dir / 'features.pkl', 'wb') as f:
                 pickle.dump(selected_features, f)
 
@@ -567,7 +557,8 @@ def train_advanced_model(
                 'n_features': len(selected_features),
                 'selected_features': selected_features,
                 'best_params': best_params,
-                'metrics': result['metrics']
+                'horizon': '1m',
+                'metrics': metrics
             }
 
             with open(ticker_dir / 'metadata.json', 'w') as f:

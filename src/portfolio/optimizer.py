@@ -85,6 +85,10 @@ class PortfolioOptimizer:
             return {returns.columns[0]: 1.0}
 
         logger.info(f"Running Markowitz optimization ({method})")
+        if ml_predictions:
+            logger.info(f"  ML predictions provided for {len(ml_predictions)} tickers: {list(ml_predictions.keys())}")
+        else:
+            logger.warning("  No ML predictions provided, will use historical returns")
 
         try:
             # Additional validation: ensure no NaN in returns
@@ -99,12 +103,19 @@ class PortfolioOptimizer:
             if returns.empty or len(returns) < 20:
                 raise ValueError(f"Insufficient clean data: {len(returns)} rows")
 
-            # Calculate expected returns - use ML predictions if available
+            # Calculate expected returns - ALWAYS prefer ML predictions over historical
             if ml_predictions:
-                # Use ML predictions (adjusted by RealityCheck)
-                mu = pd.Series({ticker: ml_predictions.get(ticker, 0)
-                               for ticker in returns.columns})
-                logger.info("Using ML predictions for expected returns")
+                # Use ML predictions (simple float format for 1m)
+                mu_dict = {}
+                for ticker in returns.columns:
+                    pred = ml_predictions.get(ticker, 0)
+                    # ML prediction is already 1-month return, use directly
+                    mu_dict[ticker] = pred
+
+                mu = pd.Series(mu_dict)
+                logger.info("Using ML predictions (1m horizon) for expected returns")
+                logger.debug(f"ML predictions: {ml_predictions}")
+                logger.debug(f"Calculated mu: {mu.to_dict()}")
 
                 # Check if all predictions are negative
                 if (mu <= 0).all():
@@ -113,9 +124,9 @@ class PortfolioOptimizer:
                     tickers = returns.columns
                     return {ticker: 1.0/len(tickers) for ticker in tickers}
             else:
-                # Fallback to historical mean
+                # Fallback to historical mean only if no ML predictions
                 mu = expected_returns.mean_historical_return(returns)
-                logger.info("Using historical mean for expected returns")
+                logger.info("Using historical mean for expected returns (no ML predictions available)")
 
             # Check for NaN in mu and remove problematic tickers
             if mu.isnull().any():
@@ -136,7 +147,13 @@ class PortfolioOptimizer:
                     raise ValueError("All tickers have NaN expected returns")
 
                 # Recalculate mu with remaining tickers
-                mu = expected_returns.mean_historical_return(returns)
+                if ml_predictions:
+                    # Keep using ML predictions for remaining tickers
+                    mu = pd.Series({ticker: ml_predictions.get(ticker, 0)
+                                   for ticker in returns.columns})
+                    logger.info("Using ML predictions for remaining tickers")
+                else:
+                    mu = expected_returns.mean_historical_return(returns)
 
                 # If still NaN, give up
                 if mu.isnull().any():
@@ -389,7 +406,8 @@ class PortfolioOptimizer:
         self,
         returns: pd.DataFrame,
         alpha: float = 0.95,
-        target_return: Optional[float] = None
+        target_return: Optional[float] = None,
+        ml_predictions: Optional[Dict[str, float]] = None
     ) -> Dict[str, float]:
         """
         Conditional Value-at-Risk (CVaR) optimization.
@@ -398,6 +416,7 @@ class PortfolioOptimizer:
             returns: DataFrame of asset returns
             alpha: Confidence level (e.g., 0.95 for 95% CVaR)
             target_return: Minimum target return
+            ml_predictions: Optional ML predictions for expected returns
 
         Returns:
             Dictionary of ticker to weight
@@ -435,7 +454,20 @@ class PortfolioOptimizer:
 
         # Target return constraint
         if target_return:
-            expected_return = cp.sum(cp.multiply(returns.mean().values, weights))
+            # Use ML predictions if available, otherwise historical mean
+            if ml_predictions:
+                mu_list = []
+                for ticker in returns.columns:
+                    pred = ml_predictions.get(ticker, 0)
+                    # ML prediction is already 1-month return
+                    mu_list.append(pred)
+                mu = np.array(mu_list)
+                logger.info("CVaR: Using ML predictions (1m horizon) for expected returns")
+            else:
+                mu = returns.mean().values
+                logger.info("CVaR: Using historical mean for expected returns")
+
+            expected_return = cp.sum(cp.multiply(mu, weights))
             constraints.append(expected_return >= target_return)
 
         # Solve
@@ -540,9 +572,32 @@ class PortfolioOptimizer:
         # Calculate expected return - use ML predictions if available
         if ml_predictions:
             # Use ML predictions for expected return
-            annual_return = sum(weights.get(ticker, 0) * ml_predictions.get(ticker, 0)
-                              for ticker in returns.columns)
-            logger.info(f"Using ML predictions for expected return: {annual_return*100:.2f}%")
+            # ML predictions now support multi-horizon: {ticker: {1d, 1w, 1m, 1y}}
+
+            # Calculate returns for ALL horizons
+            returns_by_horizon = {'1d': 0.0, '1w': 0.0, '1m': 0.0, '1y': 0.0}
+
+            for ticker in returns.columns:
+                weight = weights.get(ticker, 0)
+                pred = ml_predictions.get(ticker, {})
+
+                if isinstance(pred, dict):
+                    # Multi-horizon predictions available
+                    for horizon in ['1d', '1w', '1m', '1y']:
+                        if horizon in pred:
+                            returns_by_horizon[horizon] += weight * pred[horizon]
+                else:
+                    # Old format: single float value (assume 1d)
+                    returns_by_horizon['1d'] += weight * pred
+                    returns_by_horizon['1y'] = returns_by_horizon['1d'] * 80  # Conservative
+
+            # Use 1y for annual_return (primary metric)
+            annual_return = returns_by_horizon['1y']
+
+            logger.info(f"Using ML predictions: 1d={returns_by_horizon['1d']*100:+.2f}%, "
+                       f"1w={returns_by_horizon['1w']*100:+.2f}%, "
+                       f"1m={returns_by_horizon['1m']*100:+.2f}%, "
+                       f"1y={returns_by_horizon['1y']*100:+.2f}%")
         else:
             # Fallback to historical mean
             annual_return = portfolio_returns.mean() * 252
@@ -561,10 +616,16 @@ class PortfolioOptimizer:
         downside_vol = downside_returns.std() * np.sqrt(252)
         sortino = (annual_return - self.risk_free_rate) / downside_vol if downside_vol != 0 else 0
 
-        return {
+        metrics = {
             'annual_return': annual_return,
             'annual_volatility': annual_vol,
             'sharpe_ratio': sharpe,
             'sortino_ratio': sortino,
             'max_drawdown': max_drawdown
         }
+
+        # Add multi-horizon returns if ML predictions were used
+        if ml_predictions and 'returns_by_horizon' in locals():
+            metrics['returns_by_horizon'] = returns_by_horizon
+
+        return metrics

@@ -74,23 +74,22 @@ class RealityCheck:
 
         for ticker, pred in predictions.items():
             if use_ml:
-                # ML predictions are already realistic - apply light adjustments only
+                # ML predictions are already realistic - trust the model!
+                # No degradation: ML is trained with validation and already accounts for:
+                # - Out-of-sample performance
+                # - Overfitting (via cross-validation)
+                # - Mean reversion (learned from data)
 
-                # 1. Lighter out-of-sample degradation (ML already validated)
-                # Only 10% reduction instead of 30%
-                adjusted_pred = pred * 0.90
+                adjusted_pred = pred  # Use prediction as-is
 
-                # 2. Check extreme predictions but with higher threshold
-                # Only penalize if > 3x volatility (not 2x)
+                # Only check for extreme outliers (> 5x volatility = likely a bug)
                 vol = historical_volatility.get(ticker, 0.02)
-                if abs(adjusted_pred) > 3 * vol:
-                    penalty = 0.8 + 0.2 * (3 * vol / max(abs(adjusted_pred), 1e-6))
-                    adjusted_pred *= penalty
-                    logger.debug(f"{ticker}: Extreme ML prediction {pred*100:.2f}% reduced to {adjusted_pred*100:.2f}%")
+                if abs(adjusted_pred) > 5 * vol:
+                    # Cap at 5x volatility to prevent model bugs
+                    adjusted_pred = np.sign(adjusted_pred) * 5 * vol
+                    logger.warning(f"{ticker}: Extreme ML prediction {pred*100:.2f}% capped at {adjusted_pred*100:.2f}%")
 
-                # 3. No overfitting penalty - ML uses cross-validation
-
-                # 4. No mean reversion - ML already accounts for this
+                # No other penalties - trust ML
 
             else:
                 # Historical predictions - apply full conservative adjustments

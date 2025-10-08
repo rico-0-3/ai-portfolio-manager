@@ -77,6 +77,12 @@ class DynamicWeightCalibrator:
                         else:
                             predictions = model.predict(X_val)
                             y_val_seq = y_val
+                    elif model_name == 'xgboost':
+                        # XGBoost Booster requires DMatrix
+                        import xgboost as xgb
+                        dval = xgb.DMatrix(X_val)
+                        predictions = model.predict(dval)
+                        y_val_seq = y_val
                     else:
                         predictions = model.predict(X_val)
                         y_val_seq = y_val
