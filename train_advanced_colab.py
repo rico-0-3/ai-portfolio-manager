@@ -572,16 +572,53 @@ def train_advanced_model(
         # 9. Validation complete (already done above)
         logger.info(f"📊 Step 9/10: Validation complete")
 
-        # 10. Save all models
-        logger.info(f"💾 Step 10/10: Saving all models...")
+        # 10. Create and save UnifiedEnsembleModel
+        logger.info(f"💾 Step 10/10: Creating UnifiedEnsembleModel...")
+
+        # Calculate optimal ensemble weights based on validation performance
+        ensemble_weights = {}
+        total_inverse_mae = 0.0
+
+        for model_name, model_metrics in all_metrics.items():
+            mae = model_metrics['test_mae']
+            # Weight = inverse MAE (lower MAE = higher weight)
+            inverse_mae = 1.0 / (mae + 1e-6)
+            ensemble_weights[model_name] = inverse_mae
+            total_inverse_mae += inverse_mae
+
+        # Normalize to sum to 1.0
+        ensemble_weights = {k: v/total_inverse_mae for k, v in ensemble_weights.items()}
+
+        logger.info(f"  Ensemble weights (optimized):")
+        for name, weight in ensemble_weights.items():
+            logger.info(f"    {name}: {weight:.3f}")
+
+        # Create unified model
+        from src.models.ensemble_model_unified import UnifiedEnsembleModel
+
+        metadata = {
+            'ticker': ticker,
+            'training_date': datetime.now().isoformat(),
+            'period': period,
+            'n_samples': len(X_selected),
+            'n_features': len(selected_features),
+            'selected_features': selected_features,
+            'best_params': best_params_xgb,
+            'horizon': '1m',
+            'metrics': metrics
+        }
+
+        unified_model = UnifiedEnsembleModel(
+            models=trained_models,
+            weights=ensemble_weights,
+            scaler=scaler,
+            selected_features=selected_features,
+            metadata=metadata
+        )
 
         result = {
             'ticker': ticker,
-            'models': trained_models,
-            'scaler': scaler,
-            'selected_features': selected_features,
-            'feature_importance': importance,
-            'best_params': best_params_xgb,
+            'unified_model': unified_model,
             'metrics': metrics
         }
 
@@ -589,35 +626,9 @@ def train_advanced_model(
             ticker_dir = save_dir / ticker
             ticker_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save all trained models
-            for model_name, model_obj in trained_models.items():
-                with open(ticker_dir / f'{model_name}.pkl', 'wb') as f:
-                    pickle.dump(model_obj, f)
-                logger.info(f"    ✓ Saved {model_name}.pkl")
-
-            # Save scaler (shared across all models)
-            with open(ticker_dir / 'scaler.pkl', 'wb') as f:
-                pickle.dump(scaler, f)
-
-            # Save selected features
-            with open(ticker_dir / 'features.pkl', 'wb') as f:
-                pickle.dump(selected_features, f)
-
-            metadata = {
-                'ticker': ticker,
-                'training_date': datetime.now().isoformat(),
-                'period': period,
-                'n_samples': len(X_selected),
-                'n_features': len(selected_features),
-                'selected_features': selected_features,
-                'best_params': best_params_xgb,
-                'horizon': '1m',
-                'models': list(trained_models.keys()),
-                'metrics': metrics
-            }
-
-            with open(ticker_dir / 'metadata.json', 'w') as f:
-                json.dump(metadata, f, indent=2)
+            # Save unified model (saves all sub-models automatically)
+            unified_model.save(ticker_dir)
+            logger.info(f"    ✓ Saved UnifiedEnsembleModel to {ticker_dir}/")
 
             logger.info(f"✓ Saved to {ticker_dir}/")
 

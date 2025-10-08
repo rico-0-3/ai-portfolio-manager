@@ -1,4 +1,5 @@
-- pre allenare anche gli altri modelli, non solo 1, in modo da averli tutti (modificare anche che se ha pretrained li prende tutti e non solo 1)
+- finire di sistemare per preallenamento e usare tutti i modelli pretrainati. 
+- Fatti spiegar ecosa fa l'orchestrator in fila, con quali parametri e a cosa serve, poi pulire se necessario
 - Testare con modelli pre allenato
 - Sistemare return e tutto
 - Automatizzare il tutto

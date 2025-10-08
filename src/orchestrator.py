@@ -439,9 +439,6 @@ class PortfolioOrchestrator:
                         (pretrained_dir / "features.pkl").exists()
                     )
 
-                    if has_pretrained:
-                        self.logger.info(f"{ticker}: Loading pretrained model...")
-
                     # Prepare features
                     if len(df) < 100:
                         self.logger.warning(f"{ticker}: Insufficient data ({len(df)} rows), skipping")
@@ -456,12 +453,47 @@ class PortfolioOrchestrator:
                         predictions[ticker] = 0.0
                         continue
 
+                    if has_pretrained:
+                        # ========== SIMPLIFIED: Use UnifiedEnsembleModel ==========
+                        try:
+                            from src.models.ensemble_model_unified import UnifiedEnsembleModel
+
+                            self.logger.info(f"{ticker}: Loading UnifiedEnsembleModel...")
+
+                            # Load unified model
+                            ensemble_model = UnifiedEnsembleModel.load(pretrained_dir)
+
+                            # Prepare data for prediction
+                            X = df[feature_cols].values
+                            X_test = X[-1].reshape(1, -1)  # Last observation
+
+                            # Make prediction (handles everything internally)
+                            prediction = ensemble_model.predict(X_test, feature_cols)
+
+                            # Store prediction
+                            predictions[ticker] = prediction
+
+                            # Log
+                            model_names = ensemble_model.get_model_names()
+                            weights = ensemble_model.get_weights()
+                            self.logger.info(f"{ticker}: ✓ Prediction = {prediction*100:+.2f}% (ensemble: {len(model_names)} models)")
+                            for name in model_names:
+                                self.logger.debug(f"  {name}: weight={weights.get(name, 0):.3f}")
+
+                            continue  # Skip training from scratch
+
+                        except Exception as e:
+                            self.logger.warning(f"{ticker}: UnifiedEnsembleModel failed - {e}")
+                            self.logger.warning(f"{ticker}: Falling back to training from scratch")
+                            has_pretrained = False
+
+                    # ========== FALLBACK: Train from scratch (if no pretrained) ==========
                     # Count feature types
                     fund_features = [c for c in feature_cols if c.startswith('fund_')]
                     analyst_features = [c for c in feature_cols if c.startswith('analyst_')]
                     tech_features = [c for c in feature_cols if not c.startswith('fund_') and not c.startswith('analyst_')]
 
-                    self.logger.info(f"{ticker}: Using {len(feature_cols)} features for ML (tech: {len(tech_features)}, fund: {len(fund_features)}, analyst: {len(analyst_features)})")
+                    self.logger.info(f"{ticker}: Training from scratch - {len(feature_cols)} features (tech: {len(tech_features)}, fund: {len(fund_features)}, analyst: {len(analyst_features)})")
 
                     X = df[feature_cols].values
                     y = df['Close'].pct_change().shift(-1).fillna(0).values  # Next day return
