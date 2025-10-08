@@ -63,6 +63,7 @@ warnings.filterwarnings('ignore')
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from src.utils.config_loader import ConfigLoader
 from src.data.market_data import MarketDataFetcher
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.feature_engineering import FeatureEngineer
@@ -506,6 +507,7 @@ def optimize_hyperparameters_multiobjective(
 
 def train_perfect_model(
     ticker: str,
+    config: ConfigLoader,
     period: str = '10y',
     optimize_hp: bool = True,
     save_dir: Path = Path('data/models/pretrained_perfect')
@@ -729,6 +731,7 @@ def main():
         logger.error("Must specify --tickers or --top50")
         sys.exit(1)
 
+    config = ConfigLoader()
     save_dir = Path(args.output)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -744,7 +747,7 @@ def main():
             futures = {
                 executor.submit(
                     train_perfect_model,
-                    ticker, args.period, args.optimize, save_dir
+                    ticker, config, args.period, args.optimize, save_dir
                 ): ticker
                 for ticker in tickers
             }
@@ -762,7 +765,7 @@ def main():
         # Sequential training
         for i, ticker in enumerate(tickers, 1):
             logger.info(f"\n[{i}/{len(tickers)}] {ticker}")
-            result = train_perfect_model(ticker, args.period, args.optimize, save_dir)
+            result = train_perfect_model(ticker, config, args.period, args.optimize, save_dir)
             if result:
                 results.append(result)
 
