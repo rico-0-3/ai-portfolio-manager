@@ -770,6 +770,8 @@ def main():
             }
 
             for future in as_completed(futures):
+                logger.info(f"\n{'-'*70}")
+                logger.info(f"Checking completed ticker...")
                 ticker = futures[future]
                 try:
                     result = future.result()
