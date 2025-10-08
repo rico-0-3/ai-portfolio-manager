@@ -629,15 +629,15 @@ def main():
         gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory_gb:.1f} GB)")
 
-        # Auto-adjust parallel tickers based on GPU memory
-        if use_parallel:
-            max_parallel = int(gpu_memory_gb / 4)  # ~4GB per ticker
-            if args.parallel_tickers > max_parallel:
-                logger.warning(f"⚠️  Reducing parallel tickers from {args.parallel_tickers} to {max_parallel} (GPU memory limit)")
-                args.parallel_tickers = max_parallel
+    #     # Auto-adjust parallel tickers based on GPU memory
+    #     if use_parallel:
+    #         max_parallel = int(gpu_memory_gb / 4)  # ~4GB per ticker
+    #         if args.parallel_tickers > max_parallel:
+    #             logger.warning(f"⚠️  Reducing parallel tickers from {args.parallel_tickers} to {max_parallel} (GPU memory limit)")
+    #             args.parallel_tickers = max_parallel
 
-            logger.info(f"🔥 Parallel mode: {args.parallel_tickers} tickers simultaneously")
-            logger.info(f"   Expected GPU saturation: ~{args.parallel_tickers * 30}% utilization")
+    #         logger.info(f"🔥 Parallel mode: {args.parallel_tickers} tickers simultaneously")
+    #         logger.info(f"   Expected GPU saturation: ~{args.parallel_tickers * 30}% utilization")
 
     # Train
     logger.info(f"\n{'='*70}")
