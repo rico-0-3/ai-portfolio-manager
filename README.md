@@ -223,28 +223,6 @@ xgb.train(X_train, y_train)
 predictions = xgb.predict(X_test)
 ```
 
-### Backtesting
-
-```python
-from src.backtesting.backtest_engine import BacktestEngine
-
-engine = BacktestEngine(
-    initial_capital=10000,
-    commission=0.001
-)
-
-results = engine.run(
-    price_data=price_dict,
-    signals=signal_dict,
-    rebalance_frequency='weekly'
-)
-
-print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
-print(f"Total Return: {results['cumulative_return']*100:.2f}%")
-```
-
----
-
 ## 📦 Dependencies
 
 Core requirements:
