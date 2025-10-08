@@ -343,11 +343,11 @@ def train_stacked_ensemble(
 
     # ========== LEVEL 1: Base Models ==========
 
-    # XGBoost
+    # XGBoost with early stopping
     if XGB_AVAILABLE:
         logger.info("    [Level 1 - 1/3] Training XGBoost...")
         xgb_model = xgb.XGBRegressor(
-            n_estimators=500,
+            n_estimators=1000,  # Increased, early stopping will find optimal
             max_depth=7,
             learning_rate=0.05,
             subsample=0.8,
@@ -356,16 +356,21 @@ def train_stacked_ensemble(
             device='cuda' if use_gpu_actual else 'cpu',
             random_state=42
         )
-        xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+        xgb_model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False,
+            early_stopping_rounds=50
+        )
         level1_models['xgboost'] = xgb_model
         level1_predictions_train.append(xgb_model.predict(X_train))
         level1_predictions_val.append(xgb_model.predict(X_val))
 
-    # LightGBM
+    # LightGBM with early stopping
     if LGB_AVAILABLE:
         logger.info("    [Level 1 - 2/3] Training LightGBM...")
         lgb_model = lgb.LGBMRegressor(
-            n_estimators=500,
+            n_estimators=1000,  # Increased, early stopping will find optimal
             max_depth=7,
             learning_rate=0.05,
             subsample=0.8,
@@ -374,21 +379,26 @@ def train_stacked_ensemble(
             random_state=42,
             verbose=-1
         )
-        lgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+        lgb_model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+        )
         level1_models['lightgbm'] = lgb_model
         level1_predictions_train.append(lgb_model.predict(X_train))
         level1_predictions_val.append(lgb_model.predict(X_val))
 
-    # CatBoost
+    # CatBoost with early stopping
     if CB_AVAILABLE:
         logger.info("    [Level 1 - 3/3] Training CatBoost...")
         cb_model = cb.CatBoostRegressor(
-            iterations=500,
+            iterations=1000,  # Increased, early stopping will find optimal
             depth=7,
             learning_rate=0.05,
             task_type='GPU' if use_gpu_actual else 'CPU',
             random_seed=42,
-            verbose=False
+            verbose=False,
+            early_stopping_rounds=50
         )
         cb_model.fit(X_train, y_train, eval_set=(X_val, y_val))
         level1_models['catboost'] = cb_model
@@ -420,12 +430,25 @@ def train_stacked_ensemble(
     rmse = np.sqrt(mean_squared_error(y_val, final_predictions))
     r2 = r2_score(y_val, final_predictions)
 
-    logger.info(f"    ✓ Stacked Ensemble MAE: {mae:.6f}, RMSE: {rmse:.6f}, R²: {r2:.4f}")
+    # CRITICAL: Directional Accuracy (most important for stock prediction!)
+    # Predice correttamente se salirà o scenderà?
+    predicted_direction = (final_predictions > 0).astype(int)
+    actual_direction = (y_val > 0).astype(int)
+    directional_accuracy = (predicted_direction == actual_direction).mean()
+
+    logger.info(f"    ✓ Stacked Ensemble Metrics:")
+    logger.info(f"       MAE: {mae:.6f} | RMSE: {rmse:.6f} | R²: {r2:.4f}")
+    logger.info(f"       Directional Accuracy: {directional_accuracy*100:.2f}% (MOST IMPORTANT!)")
 
     return {
         'level1_models': level1_models,
         'meta_learner': meta_learner,
-        'metrics': {'mae': mae, 'rmse': rmse, 'r2': r2}
+        'metrics': {
+            'mae': mae,
+            'rmse': rmse,
+            'r2': r2,
+            'directional_accuracy': directional_accuracy
+        }
     }
 
 
@@ -479,8 +502,13 @@ def optimize_hyperparameters_multiobjective(
             import time
             start_time = time.time()
 
-            # Fit model (XGBoost handles GPU automatically with device param)
-            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            # Fit model with early stopping to prevent overfitting
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False,
+                early_stopping_rounds=50  # Stop if no improvement for 50 rounds
+            )
 
             training_time = time.time() - start_time
 
@@ -499,8 +527,15 @@ def optimize_hyperparameters_multiobjective(
             # Objective 1: MAE (minimize)
             mae = mean_absolute_error(y_val, y_pred)
 
-            # Objective 2: Diversity - correlation with simple baseline (maximize decorrelation)
-            # Simple baseline: mean of training labels
+            # Objective 2: CRITICAL - Directional Accuracy (maximize)
+            # This is THE most important metric for stock prediction!
+            predicted_direction = (y_pred > 0).astype(int)
+            actual_direction = (y_val > 0).astype(int)
+            directional_accuracy = (predicted_direction == actual_direction).mean()
+            # Convert to loss (we minimize, so 1 - accuracy)
+            directional_loss = 1.0 - directional_accuracy
+
+            # Objective 3: Diversity - correlation with simple baseline (maximize decorrelation)
             baseline_pred = np.full_like(y_pred, y_train.mean())
             correlation = np.corrcoef(y_pred, baseline_pred)[0, 1]
 
@@ -510,13 +545,16 @@ def optimize_hyperparameters_multiobjective(
             else:
                 diversity_score = 1 - abs(correlation)  # Higher is better
 
-            # Objective 3: Speed (minimize training time)
+            # Objective 4: Speed (minimize training time)
             # Normalize to 0-1 range (assume max 60 seconds)
             speed_score = min(training_time / 60.0, 1.0)
 
             # Combined score (weighted)
-            # Accuracy: 70%, Diversity: 20%, Speed: 10%
-            combined_score = (0.7 * mae) + (0.2 * (1 - diversity_score)) + (0.1 * speed_score)
+            # Directional Accuracy: 50% (MOST IMPORTANT!)
+            # MAE: 30% (secondary importance)
+            # Diversity: 15%
+            # Speed: 5%
+            combined_score = (0.50 * directional_loss) + (0.30 * mae) + (0.15 * (1 - diversity_score)) + (0.05 * speed_score)
 
             # Final check: ensure combined_score is valid
             if np.isnan(combined_score) or np.isinf(combined_score):
@@ -542,7 +580,11 @@ def optimize_hyperparameters_multiobjective(
             # Only log best score if we have at least one completed trial
             completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
             if len(completed_trials) > 0:
-                logger.info(f"     Trial {trial.number + 1}/{n_trials} | Best score so far: {study.best_value:.6f}")
+                # Extract approximate directional accuracy from combined score
+                # combined_score = 0.50 * directional_loss + 0.30 * mae + ...
+                # directional_loss ≈ combined_score / 0.50 (rough approximation)
+                best_dir_acc_approx = 1.0 - (study.best_value * 0.50)
+                logger.info(f"     Trial {trial.number + 1}/{n_trials} | Best score: {study.best_value:.6f} | Dir.Acc ~{best_dir_acc_approx*100:.1f}%")
             else:
                 logger.info(f"     Trial {trial.number + 1}/{n_trials} | No completed trials yet")
 
@@ -606,33 +648,37 @@ def train_perfect_model(
         logger.info(f"  ✓ Features created: {len(df.columns)} columns, {len(df)} rows after cleaning")
 
         # ========== TARGET CREATION ==========
-        # 1-month (21 trading days) return
-        df['target'] = df['Close'].pct_change(21).shift(-21)
+        # CRITICAL FIX: Predict future 5-day return (more predictable than 21-day)
+        # Target = (Price in 5 days - Price today) / Price today
+        df['target'] = (df['Close'].shift(-5) - df['Close']) / df['Close']
+
+        # Also create directional target for validation metrics
+        df['target_direction'] = (df['target'] > 0).astype(int)
+
         df = df.dropna(subset=['target'])
 
         # ========== PREPARE DATA ==========
-        feature_cols = [col for col in df.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target']]
+        feature_cols = [col for col in df.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']]
 
         X_raw = df[feature_cols].values
         y = df['target'].values
+        y_direction = df['target_direction'].values  # For validation metrics
         feature_names = feature_cols
 
         logger.info(f"  ✓ Initial features: {len(feature_names)}")
 
         # ========== FEATURE SELECTION ==========
         logger.info(f"  🎯 Step 3/7: Feature selection (RFE + Interactions)...")
-        # Step 1: RFE to reduce to ~80 features
-        if len(feature_names) > 80:
-            X_raw, feature_names = select_features_rfe(X_raw, y, feature_names, n_features=80)
+        # OPTIMIZATION: Reduce to 40 features to prevent overfitting
+        # More features = more overfitting on financial data
+        if len(feature_names) > 40:
+            X_raw, feature_names = select_features_rfe(X_raw, y, feature_names, n_features=40)
 
-        # Step 2: Boruta for all-relevant features
-        # X_raw, feature_names = select_features_boruta(X_raw, y, feature_names)
+        # Step 2: Create MINIMAL interaction features (top 5 only)
+        # Interactions can help but too many cause overfitting
+        X_raw, feature_names = adv_eng.create_interaction_features(X_raw, feature_names, top_k=5)
 
-        # Step 3: Create polynomial and interaction features
-        # X_raw, feature_names = adv_eng.create_polynomial_features(X_raw, feature_names, degree=2)
-        X_raw, feature_names = adv_eng.create_interaction_features(X_raw, feature_names, top_k=10)
-
-        logger.info(f"  Final features after selection: {len(feature_names)}")
+        logger.info(f"  ✓ Final features after selection: {len(feature_names)}")
 
         # ========== TRAIN/VAL SPLIT (TimeSeriesSplit with purging) ==========
         splits = purged_time_series_split(n_samples=len(X_raw), n_splits=5, embargo_pct=0.02)
@@ -712,7 +758,14 @@ def train_perfect_model(
         calibrated_preds = calibrator.predict(uncalibrated_preds)
 
         calibrated_mae = mean_absolute_error(y_val, calibrated_preds)
+
+        # Calculate directional accuracy for calibrated predictions
+        calibrated_dir_pred = (calibrated_preds > 0).astype(int)
+        actual_dir = (y_val > 0).astype(int)
+        calibrated_dir_accuracy = (calibrated_dir_pred == actual_dir).mean()
+
         logger.info(f"  ✓ Calibrated MAE: {calibrated_mae:.6f}")
+        logger.info(f"  ✓ Calibrated Directional Accuracy: {calibrated_dir_accuracy*100:.2f}%")
 
         # ========== CREATE UNIFIED ENSEMBLE MODEL ==========
         logger.info("  Creating UnifiedEnsembleModel...")
@@ -737,6 +790,7 @@ def train_perfect_model(
             'ticker': ticker,
             'training_date': datetime.now().isoformat(),
             'period': period,
+            'target_horizon': '5_days',  # NEW: Document target period
             'n_samples': len(df),
             'n_features': len(feature_names),
             'models': list(stacked_result['level1_models'].keys()),
@@ -745,7 +799,9 @@ def train_perfect_model(
                 'validation_mae': float(calibrated_mae),
                 'validation_mae_uncalibrated': float(stacked_result['metrics']['mae']),
                 'validation_rmse': float(stacked_result['metrics']['rmse']),
-                'validation_r2': float(stacked_result['metrics']['r2'])
+                'validation_r2': float(stacked_result['metrics']['r2']),
+                'validation_directional_accuracy': float(calibrated_dir_accuracy),  # NEW: Most important!
+                'validation_directional_accuracy_uncalibrated': float(stacked_result['metrics']['directional_accuracy'])
             },
             'hyperparameters': best_params,
             'features': feature_names

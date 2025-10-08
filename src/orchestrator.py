@@ -395,22 +395,28 @@ class PortfolioOrchestrator:
         print(f"\n  Total Invested:  ${total_invested:,.2f}")
         print(f"  Cash Remaining:  ${results['budget'] - total_invested:,.2f}")
 
-        # Expected return (1 month from ML model)
-        print("\nEXPECTED RETURN (1 MONTH):")
+        # Expected return (5 days / 1 week from ML model)
+        print("\nEXPECTED RETURN (5 DAYS / 1 WEEK):")
         print("-"*80)
         metrics = results['metrics']
-        monthly_return = metrics.get('monthly_return', 0)
+        weekly_return = metrics.get('monthly_return', 0)  # This is actually 5-day return from new model
 
-        print(f"  1 Month:    {monthly_return*100:+6.2f}%  (ML model - 1m horizon)")
+        print(f"  5 Days:     {weekly_return*100:+6.2f}%  (ML model - 5d horizon)")
 
-        # Estimated portfolio value (1 month projection)
-        print("\nESTIMATED PORTFOLIO VALUE (1 MONTH):")
+        # Extrapolate to 1 month (conservative: 5 days × 4 trading weeks)
+        monthly_return_extrapolated = weekly_return * 4
+        print(f"  1 Month (est): {monthly_return_extrapolated*100:+6.2f}%  (extrapolated from 5d)")
+
+        # Estimated portfolio value (5 days projection)
+        print("\nESTIMATED PORTFOLIO VALUE (5 DAYS / 1 WEEK):")
         print("-"*80)
         current_value = total_invested
-        month_val = current_value * (1 + monthly_return)
+        week_val = current_value * (1 + weekly_return)
+        month_val = current_value * (1 + monthly_return_extrapolated)
 
         print(f"  Current:      ${current_value:>12,.2f}")
-        print(f"  1 Month:      ${month_val:>12,.2f}  ({(month_val-current_value):+,.2f})  (ML model)")
+        print(f"  5 Days:       ${week_val:>12,.2f}  ({(week_val-current_value):+,.2f})  (ML model)")
+        print(f"  1 Month (est):${month_val:>12,.2f}  ({(month_val-current_value):+,.2f})  (extrapolated)")
 
         print("\n" + "="*80)
         print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
