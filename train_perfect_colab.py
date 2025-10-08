@@ -120,15 +120,83 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# S&P 500 Top 50 by market cap (2025)
+# S&P 500 Top 50 by market cap (2025) + Speculative/Trading Stocks
 SP500_TOP50 = [
+    # === MEGA CAPS (Safe Foundation) ===
     'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
     'V', 'XOM', 'WMT', 'JPM', 'MA', 'PG', 'AVGO', 'HD', 'CVX', 'MRK',
     'ABBV', 'KO', 'PEP', 'COST', 'ADBE', 'CSCO', 'TMO', 'ACN', 'NFLX', 'MCD',
     'ABT', 'LLY', 'NKE', 'INTC', 'TXN', 'DHR', 'VZ', 'UPS', 'PM', 'CRM',
-    'QCOM', 'WFC', 'NEE', 'MS', 'HON', 'UNP', 'RTX', 'ORCL', 'BMY', 'AMD'
+    'QCOM', 'WFC', 'NEE', 'MS', 'HON', 'UNP', 'RTX', 'ORCL', 'BMY', 'AMD',
+    
+    # === COMMODITIES & SAFE HAVENS ===
+    'GLD',   # Gold ETF
+    'SLV',   # Silver ETF
+    'USO',   # Oil ETF
+    
+    # === HIGH VOLATILITY / SPECULATIVE (Growth & Meme Stocks) ===
+    'PLTR',  # Palantir - AI/Defense (alta volatilità, sentiment-driven)
+    'COIN',  # Coinbase - Crypto proxy (segue Bitcoin)
+    'RIOT',  # Riot Platforms - Bitcoin mining (altissima volatilità)
+    'MARA',  # Marathon Digital - Bitcoin mining
+    'HOOD',  # Robinhood - Fintech speculativo
+    'SOFI',  # SoFi - Fintech growth
+    'RIVN',  # Rivian - EV competitor (volatile)
+    'LCID',  # Lucid Motors - EV luxury (speculativo)
+    'NIO',   # Nio - Chinese EV (alta volatilità)
+    'XPEV',  # XPeng - Chinese EV
+    'AI',    # C3.ai - AI puro (sentiment-driven)
+    'SNOW',  # Snowflake - Cloud/Data (growth stock)
+    'RBLX',  # Roblox - Gaming/Metaverse
+    'U',     # Unity - Gaming engine (volatile)
+    'NET',   # Cloudflare - Edge computing (growth)
+    'DKNG',  # DraftKings - Sports betting (speculativo)
+    'GME',   # GameStop - Meme stock originale
+    'AMC',   # AMC Entertainment - Meme stock
+    'BB',    # BlackBerry - Cybersecurity/Meme
+    'TLRY',  # Tilray - Cannabis (altissima volatilità)
+    'SNDL',  # Sundial - Cannabis penny stock
+    'PLUG',  # Plug Power - Hydrogen fuel (speculativo)
+    'FCEL',  # FuelCell Energy - Hydrogen
+    'SPCE',  # Virgin Galactic - Space tourism (ultra speculativo)
+    'ARKK',  # ARK Innovation ETF (Cathie Wood - growth stocks)
+    
+    # === SEMI/CHIP SECTOR (Volatile ma fundamentali) ===
+    'SMCI',  # Super Micro - AI infrastructure (volatile)
+    'ARM',   # ARM Holdings - Chip design (IPO recente)
+    'MU',    # Micron - Memory chips (ciclico)
+    'MRVL',  # Marvell - Data infrastructure
+    
+    # === BIOTECH (Alta volatilità, catalyst-driven) ===
+    'MRNA',  # Moderna - Biotech (volatile post-COVID)
+    'BNTX',  # BioNTech - mRNA vaccines
+    'CRSP',  # CRISPR Therapeutics - Gene editing
+    'EDIT',  # Editas Medicine - Gene editing
+    'NTLA',  # Intellia Therapeutics - Gene editing
+    
+    # === TECH VOLATILE ===
+    'SHOP',  # Shopify - E-commerce (growth)
+    'SQ',    # Block (Square) - Fintech/Bitcoin
+    'PYPL',  # PayPal - Fintech (volatile recentemente)
+    'UBER',  # Uber - Gig economy
+    'LYFT',  # Lyft - Ride-sharing
+    'DASH',  # DoorDash - Food delivery
+    'ZM',    # Zoom - Remote work (post-pandemic volatile)
+    'DOCU',  # DocuSign - Digital signatures
+    'TWLO',  # Twilio - Communications API
+    'OKTA',  # Okta - Identity management
+    
+    # === ENERGY VOLATILE ===
+    'FSLR',  # First Solar - Solar energy
+    'ENPH',  # Enphase - Solar inverters
+    'RUN',   # Sunrun - Residential solar
+    
+    # === CHINESE TECH (Alta volatilità geopolitica) ===
+    'BABA',  # Alibaba - E-commerce cinese
+    'PDD',   # Pinduoduo - E-commerce cinese
+    'JD',    # JD.com - E-commerce cinese
+    'BIDU',  # Baidu - Search/AI cinese
 ]
-
 
 class AdvancedFeatureEngineer:
     """Advanced feature engineering beyond basic technical indicators."""

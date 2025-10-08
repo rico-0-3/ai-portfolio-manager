@@ -110,12 +110,7 @@ class PortfolioOptimizerML:
         """
         logger.info("Generating training data for Portfolio Optimizer ML...")
 
-        from src.portfolio.optimizer import (
-            optimize_portfolio_markowitz,
-            optimize_portfolio_black_litterman,
-            optimize_portfolio_risk_parity,
-            optimize_portfolio_cvar
-        )
+        from src.portfolio.optimizer import PortfolioOptimizer
 
         X_list = []
         y_list = []
@@ -134,33 +129,36 @@ class PortfolioOptimizerML:
             # Extract features
             features = self.extract_market_features(window_returns)
 
+            # Initialize optimizer
+            optimizer = PortfolioOptimizer(risk_free_rate=0.02)
+
             # Test each optimization method
             method_scores = {}
 
             try:
                 # Markowitz
-                weights_mv = optimize_portfolio_markowitz(window_returns, ml_predictions=None, risk_free_rate=0.02)
+                weights_mv = optimizer.optimize_markowitz(window_returns)
                 future_ret_mv = (future_returns * pd.Series(weights_mv)).sum(axis=1).mean()
                 future_vol_mv = (future_returns * pd.Series(weights_mv)).sum(axis=1).std()
                 sharpe_mv = future_ret_mv / (future_vol_mv + 1e-6) * np.sqrt(252)
                 method_scores['markowitz'] = max(sharpe_mv, 0)  # Clip negative Sharpe
 
                 # Black-Litterman
-                weights_bl = optimize_portfolio_black_litterman(window_returns, ml_predictions=None, risk_free_rate=0.02)
+                weights_bl = optimizer.optimize_black_litterman(window_returns)
                 future_ret_bl = (future_returns * pd.Series(weights_bl)).sum(axis=1).mean()
                 future_vol_bl = (future_returns * pd.Series(weights_bl)).sum(axis=1).std()
                 sharpe_bl = future_ret_bl / (future_vol_bl + 1e-6) * np.sqrt(252)
                 method_scores['black_litterman'] = max(sharpe_bl, 0)
 
                 # Risk Parity
-                weights_rp = optimize_portfolio_risk_parity(window_returns, ml_predictions=None)
+                weights_rp = optimizer.optimize_risk_parity(window_returns)
                 future_ret_rp = (future_returns * pd.Series(weights_rp)).sum(axis=1).mean()
                 future_vol_rp = (future_returns * pd.Series(weights_rp)).sum(axis=1).std()
                 sharpe_rp = future_ret_rp / (future_vol_rp + 1e-6) * np.sqrt(252)
                 method_scores['risk_parity'] = max(sharpe_rp, 0)
 
                 # CVaR
-                weights_cvar = optimize_portfolio_cvar(window_returns, ml_predictions=None, alpha=0.05)
+                weights_cvar = optimizer.optimize_cvar(window_returns, alpha=0.05)
                 future_ret_cvar = (future_returns * pd.Series(weights_cvar)).sum(axis=1).mean()
                 future_vol_cvar = (future_returns * pd.Series(weights_cvar)).sum(axis=1).std()
                 sharpe_cvar = future_ret_cvar / (future_vol_cvar + 1e-6) * np.sqrt(252)

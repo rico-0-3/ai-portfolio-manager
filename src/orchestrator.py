@@ -47,10 +47,13 @@ class PortfolioOrchestrator:
             log_file=log_config.get('log_file', 'logs/orchestrator.log')
         )
 
+        self.logger.info("Initializing Market Data Fetcher...")
         # Initialize components
         self.market_fetcher = MarketDataFetcher(
             cache_dir=self.config.get('paths.data_raw', 'data/raw')
         )
+
+        self.logger.info("Initializing Sentiment Data Fetcher...")
         self.sentiment_fetcher = SentimentDataFetcher(
             news_api_key=self.config.get('data.news_api.api_key')
         )
@@ -58,17 +61,28 @@ class PortfolioOrchestrator:
         # Initialize additional data sources
         fmp_enabled = self.config.get('data.fmp.enabled', False)
         fmp_key = self.config.get('data.fmp.api_key')
+        self.logger.info(f"Initializing FMP Data Fetcher... (Enabled: {fmp_enabled})")
         self.fmp_fetcher = FMPDataFetcher(api_key=fmp_key) if fmp_enabled and fmp_key else None
 
         finnhub_enabled = self.config.get('data.finnhub.enabled', False)
         finnhub_key = self.config.get('data.finnhub.api_key')
+        self.logger.info(f"Initializing Finnhub Data Fetcher... (Enabled: {finnhub_enabled})")
         self.finnhub_fetcher = FinnhubDataFetcher(api_key=finnhub_key) if finnhub_enabled and finnhub_key else None
 
+        self.logger.info("Initializing Technical Indicators...")
         self.tech_indicators = TechnicalIndicators()
+
+        self.logger.info("Initializing Sentiment Analyzer...")
+        self.sentiment_analyzer = HybridSentimentAnalyzer()
+
+        self.logger.info("Initializing Feature Engineer...")
         self.feature_engineer = FeatureEngineer()
+
+        self.logger.info("Initializing Portfolio Optimizer...")
         self.optimizer = PortfolioOptimizer(
             risk_free_rate=self.config.get('optimization.mean_variance.risk_free_rate', 0.02)
         )
+        self.logger.info("Initializing Risk Manager...")
         self.risk_manager = RiskManager(
             max_position_size=self.config.get('portfolio.max_single_position', 0.20),
             max_drawdown=self.config.get('risk.max_drawdown', 0.25)
@@ -77,10 +91,14 @@ class PortfolioOrchestrator:
         # Dynamic weight calibrator (NEW!)
         use_dynamic_weights = self.config.get('optimization.dynamic_weights.enabled', True)
         lookback_period = self.config.get('optimization.dynamic_weights.lookback_period', 60)
+
+        self.logger.info(f"Initializing Dynamic Weight Calibrator... (Lookback Period: {lookback_period})")
         self.dynamic_calibrator = DynamicWeightCalibrator(lookback_period=lookback_period) if use_dynamic_weights else None
 
         # Reality check system (NEW!)
         use_reality_check = self.config.get('optimization.reality_check.enabled', True)
+        
+        self.logger.info(f"Initializing Reality Check System... (Enabled: {use_reality_check})")
         self.reality_check = RealityCheck(
             degradation_factor=self.config.get('optimization.reality_check.degradation_factor', 0.7),
             min_transaction_cost=self.config.get('portfolio.transaction_cost', 0.001),
@@ -136,7 +154,7 @@ class PortfolioOrchestrator:
 
         # Step 3: Load MetaModel and predict
         self.logger.info("\n[3/3] Loading MetaModel...")
-        meta_model_dir = Path("data/models/pretrained_advanced")
+        meta_model_dir = Path("data/models/pretrained_perfect")
 
         if not meta_model_dir.exists() or not (meta_model_dir / "meta_model_metadata.json").exists():
             self.logger.error(f"❌ MetaModel not found at {meta_model_dir}")
