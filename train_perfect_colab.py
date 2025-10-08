@@ -450,50 +450,79 @@ def optimize_hyperparameters_multiobjective(
     logger.info(f"     This will take ~30-45 minutes - progress shown below:")
 
     def objective(trial):
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 500, 2000),
-            'max_depth': trial.suggest_int('max_depth', 5, 15),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-            'gamma': trial.suggest_float('gamma', 0, 5),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
-            'tree_method': 'hist',
-            'device': 'cuda' if use_gpu else 'cpu',
-            'random_state': 42
-        }
+        try:
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 500, 2000),
+                'max_depth': trial.suggest_int('max_depth', 5, 15),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                'gamma': trial.suggest_float('gamma', 0, 5),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
+                'tree_method': 'hist',
+                'device': 'cuda' if use_gpu else 'cpu',
+                'random_state': 42
+            }
 
-        model = xgb.XGBRegressor(**params)
+            model = xgb.XGBRegressor(**params)
 
-        # Measure training time
-        import time
-        start_time = time.time()
-        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-        training_time = time.time() - start_time
+            # Measure training time
+            import time
+            start_time = time.time()
 
-        # Predictions
-        y_pred = model.predict(X_val)
+            # Fit model (XGBoost handles GPU automatically with device param)
+            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
-        # Objective 1: MAE (minimize)
-        mae = mean_absolute_error(y_val, y_pred)
+            training_time = time.time() - start_time
 
-        # Objective 2: Diversity - correlation with simple baseline (maximize decorrelation)
-        # Simple baseline: mean of training labels
-        baseline_pred = np.full_like(y_pred, y_train.mean())
-        correlation = np.corrcoef(y_pred, baseline_pred)[0, 1]
-        diversity_score = 1 - abs(correlation)  # Higher is better
+            # Predictions (use DMatrix for GPU to avoid CPU/GPU transfer warning)
+            if use_gpu:
+                dval = xgb.DMatrix(X_val)
+                y_pred = model.get_booster().predict(dval)
+            else:
+                y_pred = model.predict(X_val)
 
-        # Objective 3: Speed (minimize training time)
-        # Normalize to 0-1 range (assume max 60 seconds)
-        speed_score = min(training_time / 60.0, 1.0)
+            # Check for NaN in predictions
+            if np.isnan(y_pred).any() or np.isinf(y_pred).any():
+                logger.warning(f"Trial {trial.number}: predictions contain NaN/Inf, pruning trial")
+                raise optuna.TrialPruned()
 
-        # Combined score (weighted)
-        # Accuracy: 70%, Diversity: 20%, Speed: 10%
-        combined_score = (0.7 * mae) + (0.2 * (1 - diversity_score)) + (0.1 * speed_score)
+            # Objective 1: MAE (minimize)
+            mae = mean_absolute_error(y_val, y_pred)
 
-        return combined_score
+            # Objective 2: Diversity - correlation with simple baseline (maximize decorrelation)
+            # Simple baseline: mean of training labels
+            baseline_pred = np.full_like(y_pred, y_train.mean())
+            correlation = np.corrcoef(y_pred, baseline_pred)[0, 1]
+
+            # Handle constant predictions (correlation = NaN)
+            if np.isnan(correlation):
+                diversity_score = 0.0
+            else:
+                diversity_score = 1 - abs(correlation)  # Higher is better
+
+            # Objective 3: Speed (minimize training time)
+            # Normalize to 0-1 range (assume max 60 seconds)
+            speed_score = min(training_time / 60.0, 1.0)
+
+            # Combined score (weighted)
+            # Accuracy: 70%, Diversity: 20%, Speed: 10%
+            combined_score = (0.7 * mae) + (0.2 * (1 - diversity_score)) + (0.1 * speed_score)
+
+            # Final check: ensure combined_score is valid
+            if np.isnan(combined_score) or np.isinf(combined_score):
+                logger.warning(f"Trial {trial.number}: combined_score is NaN/Inf, pruning trial")
+                raise optuna.TrialPruned()
+
+            return combined_score
+
+        except optuna.TrialPruned:
+            raise
+        except Exception as e:
+            logger.warning(f"Trial {trial.number} failed: {e}")
+            raise optuna.TrialPruned()
 
     sampler = TPESampler(seed=42)
     pruner = MedianPruner(n_startup_trials=10, n_warmup_steps=5)
@@ -503,7 +532,12 @@ def optimize_hyperparameters_multiobjective(
     # Add callback to log progress every 10 trials
     def logging_callback(study, trial):
         if trial.number % 10 == 0 or trial.number == n_trials - 1:
-            logger.info(f"     Trial {trial.number + 1}/{n_trials} | Best score so far: {study.best_value:.6f}")
+            # Only log best score if we have at least one completed trial
+            completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            if len(completed_trials) > 0:
+                logger.info(f"     Trial {trial.number + 1}/{n_trials} | Best score so far: {study.best_value:.6f}")
+            else:
+                logger.info(f"     Trial {trial.number + 1}/{n_trials} | No completed trials yet")
 
     study.optimize(objective, n_trials=n_trials, n_jobs=1, show_progress_bar=False, callbacks=[logging_callback])
 
@@ -611,6 +645,19 @@ def train_perfect_model(
         scaler = RobustScaler()
         X_train_scaled = scaler.fit_transform(X_train_full)
         X_val_scaled = scaler.transform(X_val)
+
+        # ========== DATA VALIDATION ==========
+        # Critical: Ensure no NaN/Inf in training data
+        if np.isnan(X_train_scaled).any() or np.isinf(X_train_scaled).any():
+            raise ValueError(f"{ticker}: X_train contains NaN or Inf after scaling!")
+        if np.isnan(X_val_scaled).any() or np.isinf(X_val_scaled).any():
+            raise ValueError(f"{ticker}: X_val contains NaN or Inf after scaling!")
+        if np.isnan(y_train_full).any() or np.isinf(y_train_full).any():
+            raise ValueError(f"{ticker}: y_train contains NaN or Inf!")
+        if np.isnan(y_val).any() or np.isinf(y_val).any():
+            raise ValueError(f"{ticker}: y_val contains NaN or Inf!")
+
+        logger.info(f"  ✓ Data validation passed: no NaN/Inf found")
 
         # ========== HYPERPARAMETER OPTIMIZATION ==========
         logger.info(f"  🔍 Step 4/7: Hyperparameter optimization...")
