@@ -804,7 +804,39 @@ def main():
     results = []
     start_time = datetime.now()
 
-    if args.parallel_tickers > 1:
+    # ========== CHECKPOINT: Skip already completed tickers ==========
+    tickers_to_train = []
+    already_completed = []
+
+    logger.info("🔍 Checking for already completed tickers...\n")
+    for ticker in tickers:
+        ticker_dir = save_dir / ticker
+        metadata_file = ticker_dir / 'metadata.json'
+
+        # Check if ticker already has complete metadata
+        if metadata_file.exists():
+            try:
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                    # Verify it has all required fields
+                    if 'ticker' in metadata and 'metrics' in metadata:
+                        already_completed.append(ticker)
+                        logger.info(f"  ✓ {ticker} already trained (skipping)")
+                        continue
+            except:
+                pass  # If metadata is corrupted, retrain
+
+        tickers_to_train.append(ticker)
+
+    if already_completed:
+        logger.info(f"\n📋 Resume Mode: {len(already_completed)} tickers already done")
+        logger.info(f"🎯 Training {len(tickers_to_train)} remaining tickers\n")
+    else:
+        logger.info(f"🎯 Training all {len(tickers_to_train)} tickers\n")
+
+    if not tickers_to_train:
+        logger.info("✅ All tickers already trained!")
+    elif args.parallel_tickers > 1:
         # Parallel training
         logger.info(f"🚀 Training up to {args.parallel_tickers} tickers in parallel...\n")
         with ThreadPoolExecutor(max_workers=args.parallel_tickers) as executor:
@@ -813,7 +845,7 @@ def main():
                     train_perfect_model,
                     ticker, config, args.period, args.optimize, save_dir
                 ): ticker
-                for ticker in tickers
+                for ticker in tickers_to_train
             }
 
             for future in as_completed(futures):
@@ -824,15 +856,17 @@ def main():
                     result = future.result()
                     if result:
                         results.append(result)
+                        total_completed = len(results) + len(already_completed)
                         elapsed = (datetime.now() - start_time).total_seconds() / 3600
-                        remaining = (len(tickers) - len(results)) * (elapsed / len(results)) if len(results) > 0 else 0
-                        logger.info(f"✅ [{len(results)}/{len(tickers)}] {ticker} complete | Elapsed: {elapsed:.1f}h | ETA: {remaining:.1f}h")
+                        remaining = (len(tickers_to_train) - len(results)) * (elapsed / len(results)) if len(results) > 0 else 0
+                        logger.info(f"✅ [{total_completed}/{len(tickers)}] {ticker} complete | Elapsed: {elapsed:.1f}h | ETA: {remaining:.1f}h")
                 except Exception as e:
                     logger.error(f"❌ {ticker} failed: {e}")
     else:
         # Sequential training
-        for i, ticker in enumerate(tickers, 1):
-            logger.info(f"\n[{i}/{len(tickers)}] {ticker}")
+        for i, ticker in enumerate(tickers_to_train, 1):
+            total_idx = i + len(already_completed)
+            logger.info(f"\n[{total_idx}/{len(tickers)}] {ticker}")
             result = train_perfect_model(ticker, config, args.period, args.optimize, save_dir)
             if result:
                 results.append(result)
