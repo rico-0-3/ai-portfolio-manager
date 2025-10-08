@@ -328,7 +328,7 @@ def train_stacked_ensemble(
     Level 1: XGBoost, LightGBM, CatBoost, LSTM, GRU, Transformer
     Level 2: Meta-learner (XGBoost) on level-1 predictions
     """
-    logger.info("  Training Stacked Ensemble...")
+    logger.info("  🤖 Training Stacked Ensemble (~5-10 minutes)...")
 
     level1_models = {}
     level1_predictions_train = []
@@ -338,7 +338,7 @@ def train_stacked_ensemble(
 
     # XGBoost
     if XGB_AVAILABLE:
-        logger.info("    [Level 1] Training XGBoost...")
+        logger.info("    [Level 1 - 1/3] Training XGBoost...")
         xgb_model = xgb.XGBRegressor(
             n_estimators=500,
             max_depth=7,
@@ -356,7 +356,7 @@ def train_stacked_ensemble(
 
     # LightGBM
     if LGB_AVAILABLE:
-        logger.info("    [Level 1] Training LightGBM...")
+        logger.info("    [Level 1 - 2/3] Training LightGBM...")
         lgb_model = lgb.LGBMRegressor(
             n_estimators=500,
             max_depth=7,
@@ -374,7 +374,7 @@ def train_stacked_ensemble(
 
     # CatBoost
     if CB_AVAILABLE:
-        logger.info("    [Level 1] Training CatBoost...")
+        logger.info("    [Level 1 - 3/3] Training CatBoost...")
         cb_model = cb.CatBoostRegressor(
             iterations=500,
             depth=7,
@@ -446,7 +446,8 @@ def optimize_hyperparameters_multiobjective(
             'colsample_bytree': 0.8
         }
 
-    logger.info(f"  Multi-objective Optuna optimization: {n_trials} trials...")
+    logger.info(f"  🔍 Multi-objective Optuna optimization: {n_trials} trials...")
+    logger.info(f"     This will take ~30-45 minutes - progress shown below:")
 
     def objective(trial):
         params = {
@@ -498,9 +499,15 @@ def optimize_hyperparameters_multiobjective(
     pruner = MedianPruner(n_startup_trials=10, n_warmup_steps=5)
 
     study = optuna.create_study(direction='minimize', sampler=sampler, pruner=pruner)
-    study.optimize(objective, n_trials=n_trials, n_jobs=1, show_progress_bar=False)
 
-    logger.info(f"  ✓ Best trial: MAE-based score = {study.best_value:.6f}")
+    # Add callback to log progress every 10 trials
+    def logging_callback(study, trial):
+        if trial.number % 10 == 0 or trial.number == n_trials - 1:
+            logger.info(f"     Trial {trial.number + 1}/{n_trials} | Best score so far: {study.best_value:.6f}")
+
+    study.optimize(objective, n_trials=n_trials, n_jobs=1, show_progress_bar=False, callbacks=[logging_callback])
+
+    logger.info(f"  ✓ Optimization complete! Best MAE-based score = {study.best_value:.6f}")
 
     return study.best_params
 
@@ -518,15 +525,17 @@ def train_perfect_model(
     logger.info(f"\n{'='*70}")
     logger.info(f"🎯 TRAINING PERFECT MODEL: {ticker}")
     logger.info(f"{'='*70}")
+    logger.info(f"📋 Steps: Data → Features → RFE → Optuna (30-45min) → Ensemble → Calibrate → Save")
+    logger.info(f"{'='*70}")
 
     try:
         # GPU check
         use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
         if use_gpu:
-            logger.info(f"  Using GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"  ✓ Using GPU: {torch.cuda.get_device_name(0)}")
 
         # Fetch data
-        logger.info(f"  Fetching market data ({period})...")
+        logger.info(f"  ⬇️  Step 1/7: Fetching market data ({period})...")
         market_fetcher = MarketDataFetcher()
         df = market_fetcher.fetch_stock_data([ticker], period=period, interval='1d').get(ticker)
 
@@ -537,7 +546,7 @@ def train_perfect_model(
         logger.info(f"  ✓ Fetched {len(df)} rows")
 
         # ========== FEATURE ENGINEERING ==========
-        logger.info("  Engineering features...")
+        logger.info(f"  🔧 Step 2/7: Engineering features...")
 
         # Basic technical indicators
         tech_ind = TechnicalIndicators()
@@ -567,9 +576,10 @@ def train_perfect_model(
         y = df['target'].values
         feature_names = feature_cols
 
-        logger.info(f"  Initial features: {len(feature_names)}")
+        logger.info(f"  ✓ Initial features: {len(feature_names)}")
 
         # ========== FEATURE SELECTION ==========
+        logger.info(f"  🎯 Step 3/7: Feature selection (RFE + Interactions)...")
         # Step 1: RFE to reduce to ~80 features
         if len(feature_names) > 80:
             X_raw, feature_names = select_features_rfe(X_raw, y, feature_names, n_features=80)
@@ -603,6 +613,7 @@ def train_perfect_model(
         X_val_scaled = scaler.transform(X_val)
 
         # ========== HYPERPARAMETER OPTIMIZATION ==========
+        logger.info(f"  🔍 Step 4/7: Hyperparameter optimization...")
         if optimize_hp:
             best_params = optimize_hyperparameters_multiobjective(
                 X_train_scaled, y_train_full,
@@ -620,6 +631,7 @@ def train_perfect_model(
             }
 
         # ========== STACKED ENSEMBLE ==========
+        logger.info(f"  🤖 Step 5/7: Training stacked ensemble...")
         stacked_result = train_stacked_ensemble(
             X_train_scaled, y_train_full,
             X_val_scaled, y_val,
@@ -737,12 +749,17 @@ def main():
 
     logger.info(f"\n{'='*70}")
     logger.info(f"🎯 PERFECT MODEL TRAINING - {len(tickers)} tickers")
+    logger.info(f"{'='*70}")
+    logger.info(f"⏱️  Estimated time: ~1-1.5 hours per ticker with --optimize")
+    logger.info(f"    Total: ~{len(tickers) * 1.25:.0f}-{len(tickers) * 1.5:.0f} hours")
     logger.info(f"{'='*70}\n")
 
     results = []
+    start_time = datetime.now()
 
     if args.parallel_tickers > 1:
         # Parallel training
+        logger.info(f"🚀 Training up to {args.parallel_tickers} tickers in parallel...\n")
         with ThreadPoolExecutor(max_workers=args.parallel_tickers) as executor:
             futures = {
                 executor.submit(
@@ -758,7 +775,9 @@ def main():
                     result = future.result()
                     if result:
                         results.append(result)
-                        logger.info(f"✅ [{len(results)}/{len(tickers)}] {ticker} complete")
+                        elapsed = (datetime.now() - start_time).total_seconds() / 3600
+                        remaining = (len(tickers) - len(results)) * (elapsed / len(results)) if len(results) > 0 else 0
+                        logger.info(f"✅ [{len(results)}/{len(tickers)}] {ticker} complete | Elapsed: {elapsed:.1f}h | ETA: {remaining:.1f}h")
                 except Exception as e:
                     logger.error(f"❌ {ticker} failed: {e}")
     else:
