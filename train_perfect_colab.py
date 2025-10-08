@@ -321,7 +321,8 @@ def train_stacked_ensemble(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    use_gpu: bool = False
+    use_gpu: bool = False,
+    force_cpu_catboost: bool = False
 ) -> Dict:
     """
     Train stacked ensemble:
@@ -372,14 +373,15 @@ def train_stacked_ensemble(
         level1_predictions_train.append(lgb_model.predict(X_train))
         level1_predictions_val.append(lgb_model.predict(X_val))
 
-    # CatBoost
+    # CatBoost (force CPU in parallel mode to avoid GPU conflicts)
     if CB_AVAILABLE:
         logger.info("    [Level 1 - 3/3] Training CatBoost...")
+        catboost_task_type = 'CPU' if force_cpu_catboost else ('GPU' if use_gpu else 'CPU')
         cb_model = cb.CatBoostRegressor(
             iterations=500,
             depth=7,
             learning_rate=0.05,
-            task_type='GPU' if use_gpu else 'CPU',
+            task_type=catboost_task_type,
             random_seed=42,
             verbose=False
         )
@@ -679,10 +681,15 @@ def train_perfect_model(
 
         # ========== STACKED ENSEMBLE ==========
         logger.info(f"  🤖 Step 5/7: Training stacked ensemble...")
+        # Force CatBoost to CPU when training in parallel to avoid GPU conflicts
+        import multiprocessing
+        force_cpu_catboost = multiprocessing.current_process().name != 'MainProcess'
+
         stacked_result = train_stacked_ensemble(
             X_train_scaled, y_train_full,
             X_val_scaled, y_val,
-            use_gpu=use_gpu
+            use_gpu=use_gpu,
+            force_cpu_catboost=force_cpu_catboost
         )
 
         # ========== CALIBRATION ==========
