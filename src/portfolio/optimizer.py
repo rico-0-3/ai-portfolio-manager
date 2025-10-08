@@ -571,33 +571,18 @@ class PortfolioOptimizer:
 
         # Calculate expected return - use ML predictions if available
         if ml_predictions:
-            # Use ML predictions for expected return
-            # ML predictions now support multi-horizon: {ticker: {1d, 1w, 1m, 1y}}
-
-            # Calculate returns for ALL horizons
-            returns_by_horizon = {'1d': 0.0, '1w': 0.0, '1m': 0.0, '1y': 0.0}
+            # Use ML predictions for expected return (1m horizon only)
+            monthly_return = 0.0
 
             for ticker in returns.columns:
                 weight = weights.get(ticker, 0)
-                pred = ml_predictions.get(ticker, {})
+                pred = ml_predictions.get(ticker, 0)
+                monthly_return += weight * pred
 
-                if isinstance(pred, dict):
-                    # Multi-horizon predictions available
-                    for horizon in ['1d', '1w', '1m', '1y']:
-                        if horizon in pred:
-                            returns_by_horizon[horizon] += weight * pred[horizon]
-                else:
-                    # Old format: single float value (assume 1d)
-                    returns_by_horizon['1d'] += weight * pred
-                    returns_by_horizon['1y'] = returns_by_horizon['1d'] * 80  # Conservative
+            # Store as single value
+            annual_return = monthly_return  # We report monthly return directly
 
-            # Use 1y for annual_return (primary metric)
-            annual_return = returns_by_horizon['1y']
-
-            logger.info(f"Using ML predictions: 1d={returns_by_horizon['1d']*100:+.2f}%, "
-                       f"1w={returns_by_horizon['1w']*100:+.2f}%, "
-                       f"1m={returns_by_horizon['1m']*100:+.2f}%, "
-                       f"1y={returns_by_horizon['1y']*100:+.2f}%")
+            logger.info(f"Using ML predictions (1m horizon): {monthly_return*100:+.2f}%")
         else:
             # Fallback to historical mean
             annual_return = portfolio_returns.mean() * 252
@@ -617,15 +602,11 @@ class PortfolioOptimizer:
         sortino = (annual_return - self.risk_free_rate) / downside_vol if downside_vol != 0 else 0
 
         metrics = {
-            'annual_return': annual_return,
+            'monthly_return': annual_return,  # This is actually monthly return from 1m model
             'annual_volatility': annual_vol,
             'sharpe_ratio': sharpe,
             'sortino_ratio': sortino,
             'max_drawdown': max_drawdown
         }
-
-        # Add multi-horizon returns if ML predictions were used
-        if ml_predictions and 'returns_by_horizon' in locals():
-            metrics['returns_by_horizon'] = returns_by_horizon
 
         return metrics

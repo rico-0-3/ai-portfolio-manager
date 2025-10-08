@@ -292,11 +292,15 @@ def optimize_xgboost_hyperparameters(
     )
 
     # Calculate optimal n_jobs based on GPU memory
-    if use_gpu:
-        # T4 (15GB) can handle 3-4 parallel trials
-        # Smaller GPUs: 2 trials
-        n_jobs = 4 if torch.cuda.get_device_properties(0).total_memory > 12e9 else 2
-        logger.info(f"  Running {n_jobs} parallel trials to saturate GPU")
+    # if use_gpu:
+    #     # T4 (15GB) can handle 3-4 parallel trials
+    #     # Smaller GPUs: 2 trials
+    #     n_jobs = 4 if torch.cuda.get_device_properties(0).total_memory > 12e9 else 2
+    #     logger.info(f"  Running {n_jobs} parallel trials to saturate GPU")
+    # else:
+    #     n_jobs = 1
+    if use_gpu: 
+        n_jobs = 100
     else:
         n_jobs = 1
 

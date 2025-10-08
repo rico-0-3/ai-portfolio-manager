@@ -1229,33 +1229,13 @@ class PortfolioOrchestrator:
         print(f"\n  Total Invested:  ${total_invested:,.2f}")
         print(f"  Cash Remaining:  ${results['budget'] - total_invested:,.2f}")
 
-        # Time-based predictions
-        print("\nEXPECTED RETURNS:")
+        # Expected return (1 month from ML model)
+        print("\nEXPECTED RETURN (1 MONTH):")
         print("-"*80)
         metrics = results['metrics']
-        annual_return = metrics['annual_return']
+        monthly_return = metrics.get('monthly_return', 0)
 
-        # Use direct predictions from models if available, otherwise calculate
-        if 'returns_by_horizon' in metrics:
-            # Direct predictions from multi-horizon models
-            returns_by_horizon = metrics['returns_by_horizon']
-            daily_return = returns_by_horizon.get('1d', 0)
-            weekly_return = returns_by_horizon.get('1w', 0)
-            monthly_return = returns_by_horizon.get('1m', 0)
-            yearly_return = returns_by_horizon.get('1y', annual_return)
-            print(f"  1 Day:      {daily_return*100:+6.2f}%  (ML model)")
-            print(f"  1 Week:     {weekly_return*100:+6.2f}%  (ML model)")
-            print(f"  1 Month:    {monthly_return*100:+6.2f}%  (ML model)")
-            print(f"  1 Year:     {yearly_return*100:+6.2f}%  (ML model)")
-        else:
-            # Fallback: calculate from annual return
-            weekly_return = (1 + annual_return) ** (7/252) - 1
-            monthly_return = (1 + annual_return) ** (21/252) - 1
-            quarterly_return = (1 + annual_return) ** (63/252) - 1
-            print(f"  1 Week:     {weekly_return*100:+6.2f}%  (calculated)")
-            print(f"  1 Month:    {monthly_return*100:+6.2f}%  (calculated)")
-            print(f"  3 Months:   {quarterly_return*100:+6.2f}%  (calculated)")
-            print(f"  1 Year:     {annual_return*100:+6.2f}%  (calculated)")
+        print(f"  1 Month:    {monthly_return*100:+6.2f}%  (ML model - 1m horizon)")
 
         # Confidence metrics
         print("\nCONFIDENCE & RISK METRICS:")
@@ -1292,36 +1272,14 @@ class PortfolioOrchestrator:
         print(f"  VaR (95%):        {risk['var_95']*100:.2f}%")
         print(f"  CVaR (95%):       {risk['cvar_95']*100:.2f}%")
 
-        # Estimated portfolio value
-        print("\nESTIMATED PORTFOLIO VALUE:")
+        # Estimated portfolio value (1 month projection)
+        print("\nESTIMATED PORTFOLIO VALUE (1 MONTH):")
         print("-"*80)
         current_value = total_invested
+        month_val = current_value * (1 + monthly_return)
 
-        # Use the same multi-horizon returns we calculated earlier
-        if 'returns_by_horizon' in metrics:
-            returns_by_horizon = metrics['returns_by_horizon']
-            day_val = current_value * (1 + returns_by_horizon.get('1d', 0))
-            week_val = current_value * (1 + returns_by_horizon.get('1w', 0))
-            month_val = current_value * (1 + returns_by_horizon.get('1m', 0))
-            year_val = current_value * (1 + returns_by_horizon.get('1y', annual_return))
-
-            print(f"  Current:      ${current_value:>12,.2f}")
-            print(f"  1 Day:        ${day_val:>12,.2f}  ({(day_val-current_value):+,.2f})  (ML model)")
-            print(f"  1 Week:       ${week_val:>12,.2f}  ({(week_val-current_value):+,.2f})  (ML model)")
-            print(f"  1 Month:      ${month_val:>12,.2f}  ({(month_val-current_value):+,.2f})  (ML model)")
-            print(f"  1 Year:       ${year_val:>12,.2f}  ({(year_val-current_value):+,.2f})  (ML model)")
-        else:
-            # Fallback to calculated returns
-            week_val = current_value * (1 + weekly_return)
-            month_val = current_value * (1 + monthly_return)
-            quarter_val = current_value * (1 + quarterly_return)
-            year_val = current_value * (1 + annual_return)
-
-            print(f"  Current:      ${current_value:>12,.2f}")
-            print(f"  1 Week:       ${week_val:>12,.2f}  ({(week_val-current_value):+,.2f})  (calculated)")
-            print(f"  1 Month:      ${month_val:>12,.2f}  ({(month_val-current_value):+,.2f})  (calculated)")
-            print(f"  3 Months:     ${quarter_val:>12,.2f}  ({(quarter_val-current_value):+,.2f})  (calculated)")
-            print(f"  1 Year:       ${year_val:>12,.2f}  ({(year_val-current_value):+,.2f})  (calculated)")
+        print(f"  Current:      ${current_value:>12,.2f}")
+        print(f"  1 Month:      ${month_val:>12,.2f}  ({(month_val-current_value):+,.2f})  (ML model)")
 
         print("\n" + "="*80)
         print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
