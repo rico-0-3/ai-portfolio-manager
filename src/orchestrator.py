@@ -293,6 +293,11 @@ class PortfolioOrchestrator:
             ml_predictions=predictions  # Pass ML predictions for adjustment
         )
 
+        # Get optimization details from MetaModel
+        optimization_details = {}
+        if hasattr(meta_model, 'get_optimization_details'):
+            optimization_details = meta_model.get_optimization_details()
+
         results = {
             'weights': final_weights,
             'allocation': allocation,
@@ -303,6 +308,7 @@ class PortfolioOrchestrator:
             },
             'sentiment_scores': {},  # Sentiment analysis not currently used in MetaModel pipeline
             'predictions': predictions,
+            'optimization_details': optimization_details,  # NEW: Per-ticker method weights
             'latest_prices': latest_prices,
             'budget': budget
         }
@@ -483,6 +489,42 @@ class PortfolioOrchestrator:
 
         print(f"\n  Total Invested:  ${total_invested:,.2f}")
         print(f"  Cash Remaining:  ${results['budget'] - total_invested:,.2f}")
+
+        # DETAILED BREAKDOWN PER STOCK
+        print("\n\n" + "="*80)
+        print("DETAILED STOCK ANALYSIS")
+        print("="*80)
+
+        predictions = results.get('predictions', {})
+        optimization_details = results.get('optimization_details', {})
+
+        for ticker in sorted(allocation.keys(), key=lambda x: allocation[x] * prices.get(x, 0), reverse=True):
+            shares = allocation[ticker]
+            price = prices.get(ticker, 0)
+            value = shares * price
+            weight_pct = weights.get(ticker, 0) * 100
+            ml_pred = predictions.get(ticker, 0)
+
+            print(f"\n📊 {ticker}")
+            print(f"  Allocation:      ${value:>10,.2f} ({weight_pct:>5.1f}% of portfolio)")
+            print(f"  Shares:          {shares:>4d} @ ${price:.2f}")
+            print(f"  ML Prediction:   {ml_pred*100:>+6.2f}% (5-day return)")
+
+            # Show which optimization methods contributed most
+            if ticker in optimization_details:
+                method_weights = optimization_details[ticker]
+                print(f"  Optimization Method Contributions:")
+                for method, method_weight in sorted(method_weights.items(), key=lambda x: x[1], reverse=True):
+                    if method_weight > 0.01:  # Show only significant contributions
+                        print(f"    - {method:20s}: {method_weight*100:>5.1f}%")
+
+            # Risk metrics per stock (if available)
+            if 'stock_metrics' in results and ticker in results['stock_metrics']:
+                stock_metrics = results['stock_metrics'][ticker]
+                print(f"  Volatility:      {stock_metrics.get('volatility', 0)*100:>6.2f}%")
+                print(f"  Sharpe Ratio:    {stock_metrics.get('sharpe', 0):>6.2f}")
+
+        print("\n" + "="*80)
 
         # Expected return (5 days / 1 week from ML model)
         print("\nEXPECTED RETURN (5 DAYS / 1 WEEK):")

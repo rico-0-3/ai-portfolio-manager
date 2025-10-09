@@ -137,28 +137,28 @@ class PortfolioOptimizerML:
 
             try:
                 # Markowitz
-                weights_mv = optimizer.optimize_markowitz(window_returns)
+                weights_mv = optimizer.markowitz_optimization(window_returns)
                 future_ret_mv = (future_returns * pd.Series(weights_mv)).sum(axis=1).mean()
                 future_vol_mv = (future_returns * pd.Series(weights_mv)).sum(axis=1).std()
                 sharpe_mv = future_ret_mv / (future_vol_mv + 1e-6) * np.sqrt(252)
                 method_scores['markowitz'] = max(sharpe_mv, 0)  # Clip negative Sharpe
 
                 # Black-Litterman
-                weights_bl = optimizer.optimize_black_litterman(window_returns)
+                weights_bl = optimizer.black_litterman_optimization(window_returns)
                 future_ret_bl = (future_returns * pd.Series(weights_bl)).sum(axis=1).mean()
                 future_vol_bl = (future_returns * pd.Series(weights_bl)).sum(axis=1).std()
                 sharpe_bl = future_ret_bl / (future_vol_bl + 1e-6) * np.sqrt(252)
                 method_scores['black_litterman'] = max(sharpe_bl, 0)
 
                 # Risk Parity
-                weights_rp = optimizer.optimize_risk_parity(window_returns)
+                weights_rp = optimizer.risk_parity_optimization(window_returns)
                 future_ret_rp = (future_returns * pd.Series(weights_rp)).sum(axis=1).mean()
                 future_vol_rp = (future_returns * pd.Series(weights_rp)).sum(axis=1).std()
                 sharpe_rp = future_ret_rp / (future_vol_rp + 1e-6) * np.sqrt(252)
                 method_scores['risk_parity'] = max(sharpe_rp, 0)
 
                 # CVaR
-                weights_cvar = optimizer.optimize_cvar(window_returns, alpha=0.05)
+                weights_cvar = optimizer.cvar_optimization(window_returns, alpha=0.05)
                 future_ret_cvar = (future_returns * pd.Series(weights_cvar)).sum(axis=1).mean()
                 future_vol_cvar = (future_returns * pd.Series(weights_cvar)).sum(axis=1).std()
                 sharpe_cvar = future_ret_cvar / (future_vol_cvar + 1e-6) * np.sqrt(252)

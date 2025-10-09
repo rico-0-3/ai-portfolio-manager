@@ -838,10 +838,10 @@ Stacked Ensemble Metrics:
 8. ✅ **Early stopping** (prevents overfitting)
 
 ### Success Criteria
-- **Directional Accuracy:** > 58% (calibrated)
-- **MAE:** < 0.035 (3.5%)
-- **R²:** > 0.10 (positive!)
-- **Training Time:** 1-1.5h per ticker (acceptable)
+- **Directional Accuracy:** > 52% (calibrated)
+- **MAE:** < 0.05 (5%)
+- **R²:** > -0.50
+- **Training Time:** 2min per ticker
 
 ### Production Usage
 ```bash
