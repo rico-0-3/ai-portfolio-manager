@@ -21,10 +21,30 @@ from src.data.finnhub_data import FinnhubDataFetcher
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.feature_engineering import FeatureEngineer
 from src.features.advanced_feature_engineering import AdvancedFeatureEngineer
+from src.features.leakage_filters import drop_leakage_prone_features
 from src.portfolio.optimizer import PortfolioOptimizer
 from src.portfolio.risk_manager import RiskManager
 from src.dynamic_weights import DynamicWeightCalibrator
 from src.reality_check import RealityCheck
+
+
+FIXED_FEATURES = [
+    'RSI_21',
+    'S1',
+    'Volume_rolling_std_10',
+    'R1',
+    'EMA_5',
+    'R2',
+    'S3',
+    'Volume_rolling_std_21',
+    'ATR_Percent',
+    'Ichimoku_Tenkan',
+    'Pivot',
+    'PLUS_DI',
+    'Volume_rolling_mean_10',
+    'distance_from_trend_40d',
+    'OBV',
+]
 
 
 class PortfolioOrchestrator:
@@ -408,19 +428,9 @@ class PortfolioOrchestrator:
                 df = self.tech_indicators.add_all_indicators(df)
 
                 # Remove long-horizon / leakage-prone indicators to mirror training
-                leaky_features = [
-                    'SMA_200', 'EMA_200', 'VWAP',
-                    'Ichimoku_Senkou_A', 'Ichimoku_Senkou_B',
-                    'KC_Lower', 'KC_Upper', 'KC_Middle',
-                    'BB_Lower',
-                    'Volume_rolling_std_60', 'Volume_rolling_mean_60',
-                    'Volume_rolling_std_42', 'Volume_rolling_mean_42',
-                    'Return_rolling_skew_60', 'Return_rolling_kurt_42',
-                ]
-                drop_candidates = [feat for feat in leaky_features if feat in df.columns]
-                if drop_candidates:
-                    self.logger.debug(f"{ticker}: dropping leakage-prone features {drop_candidates}")
-                    df = df.drop(columns=drop_candidates)
+                df, removed_initial = drop_leakage_prone_features(df, self.logger, log_level="debug")
+                if removed_initial:
+                    self.logger.debug(f"{ticker}: removed leakage-prone indicators {removed_initial}")
 
                 # Add detrending features (EXACTLY as in training)
                 df['trend_40d'] = df['Close'].rolling(40, min_periods=15).mean().shift(1)
@@ -444,6 +454,11 @@ class PortfolioOrchestrator:
                     window=126,
                     min_periods=30,
                 )
+
+                # Final leakage cleanup (identical to training)
+                df, removed_after = drop_leakage_prone_features(df, self.logger, log_level="debug")
+                if removed_after:
+                    self.logger.debug(f"{ticker}: removed leakage-prone engineered features {removed_after}")
                 
                 # Clean data (EXACTLY as in training)
                 df = df.replace([np.inf, -np.inf], np.nan)
@@ -468,6 +483,16 @@ class PortfolioOrchestrator:
 
                 # Drop NaN
                 df = df.dropna()
+
+                base_cols = [col for col in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close'] if col in df.columns]
+                available_fixed = [feat for feat in FIXED_FEATURES if feat in df.columns]
+                missing_fixed = [feat for feat in FIXED_FEATURES if feat not in df.columns]
+
+                if missing_fixed:
+                    self.logger.warning(f"{ticker}: Missing fixed features {missing_fixed}")
+
+                keep_cols = base_cols + available_fixed
+                df = df[keep_cols]
 
                 processed_data[ticker] = df
                 features_msg = f"{ticker}: {len(df)} rows, {len(df.columns)} features"

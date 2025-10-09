@@ -68,6 +68,7 @@ from src.data.market_data import MarketDataFetcher
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.feature_engineering import FeatureEngineer
 from src.features.advanced_feature_engineering import AdvancedFeatureEngineer
+from src.features.leakage_filters import drop_leakage_prone_features
 
 # ML imports
 try:
@@ -162,6 +163,24 @@ SP500_TOP50 = [
     
     # === CHINESE TECH (Alta volatilità geopolitica) ===
     'BABA',  # Alibaba - E-commerce cinese
+]
+
+FIXED_FEATURES = [
+    'RSI_21',
+    'S1',
+    'Volume_rolling_std_10',
+    'R1',
+    'EMA_5',
+    'R2',
+    'S3',
+    'Volume_rolling_std_21',
+    'ATR_Percent',
+    'Ichimoku_Tenkan',
+    'Pivot',
+    'PLUS_DI',
+    'Volume_rolling_mean_10',
+    'distance_from_trend_40d',
+    'OBV',
 ]
 
 def purged_time_series_split(n_samples: int, n_splits: int = 5, embargo_pct: float = 0.02):
@@ -746,35 +765,9 @@ def train_perfect_model(
         # Basic technical indicators
         tech_ind = TechnicalIndicators()
         df = tech_ind.add_all_indicators(df)
-
-        # Remove high-leakage long horizon features if present
-        try:
-            leaky_features = [
-                'SMA_200',
-                'VWAP',
-                'EMA_200',
-                'Ichimoku_Senkou_A',
-                'Ichimoku_Senkou_B',
-                'KC_Lower',
-                'KC_Upper',
-                'KC_Middle',
-                'BB_Lower',
-                'Volume_rolling_std_60',
-                'Volume_rolling_mean_60',
-                'Volume_rolling_std_42',
-                'Volume_rolling_mean_42',
-                'Return_rolling_skew_60',
-                'Return_rolling_kurt_42',
-            ]
-            candidates = [feat for feat in leaky_features if feat in df.columns]
-            if candidates:
-                logger.info(
-                    "  🔒 Removing long-horizon features prone to regime leakage: %s",
-                    candidates,
-                )
-                df = df.drop(columns=candidates)
-        except Exception as leak_err:
-            logger.warning(f"  ⚠️ Skipped leaky feature removal: {leak_err}")
+        df, removed_initial = drop_leakage_prone_features(df, logger)
+        if removed_initial:
+            logger.info("  🔒 Removed leakage-prone technical indicators: %s", removed_initial)
 
         leaky_features = [
             'SMA_200',
@@ -814,6 +807,7 @@ def train_perfect_model(
             if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
         ]
         df = adv_eng.apply_rolling_zscore(df, normalization_columns, window=126, min_periods=30)
+        df, removed_after_eng = drop_leakage_prone_features(df, logger, log_level="debug")
 
         # Clean data
         df = df.replace([np.inf, -np.inf], np.nan)
@@ -897,56 +891,40 @@ def train_perfect_model(
         logger.info(f"  📊 Holdout covers ~{cycles} prediction cycles ({prediction_horizon}-day horizon)")
 
         # ========== PREPARE DATA ==========
-        feature_cols = [col for col in df_training.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']]
+        candidate_feature_cols = [
+            col for col in df_training.columns
+            if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']
+        ]
+
+        available_fixed_features = [feat for feat in FIXED_FEATURES if feat in candidate_feature_cols]
+        missing_fixed_features = [feat for feat in FIXED_FEATURES if feat not in candidate_feature_cols]
+
+        if missing_fixed_features:
+            logger.warning(
+                f"  ⚠️ Missing {len(missing_fixed_features)} fixed features for {ticker}: {missing_fixed_features}"
+            )
+
+        if not available_fixed_features:
+            raise ValueError(
+                f"No fixed features available after preprocessing for {ticker}."
+                f" Required set: {FIXED_FEATURES}"
+            )
+
+        feature_cols = available_fixed_features
 
         X_raw = df_training[feature_cols].values
         y = df_training['target'].values
         y_direction = df_training['target_direction'].values  # For validation metrics
         feature_names = feature_cols
 
-        # Prepare holdout data (if exists) - but DON'T apply feature selection yet!
-        # Feature selection happens AFTER we determine which features to keep from training data
         if df_holdout is not None:
-            X_holdout_raw_full = df_holdout[feature_cols].values  # All 99 features
+            X_holdout_selected = df_holdout[feature_cols].values
             y_holdout = df_holdout['target'].values
-            y_holdout_direction = df_holdout['target_direction'].values
         else:
-            X_holdout_raw_full = None
+            X_holdout_selected = None
             y_holdout = None
 
-        logger.info(f"  ✓ Initial features: {len(feature_names)}")
-
-        # ========== FEATURE SELECTION ==========
-        logger.info(f"  🎯 Step 3/7: Feature selection (Mutual Info + Interactions)...")
-        # OPTIMIZATION 2: Use Mutual Information instead of RFE
-        # MI captures non-linear relationships better (crucial for stock markets!)
-        if len(feature_names) > 40:
-            X_raw, feature_names = select_features_mutual_info(X_raw, y, feature_names, n_features=40)
-
-        # Step 2: Create MINIMAL interaction features (top 3 only)
-        # Interactions can help but too many cause overfitting AND high adversarial AUC
-        # ADVERSARIAL FIX: Reduce from top_k=5 → top_k=3 to decrease temporal amplification
-        X_raw, feature_names = adv_eng.create_interaction_features(X_raw, feature_names, top_k=3)
-
-        logger.info(f"  ✓ Final features after selection: {len(feature_names)}")
-
-        # Apply same feature selection to HOLDOUT set (if exists)
-        if X_holdout_raw_full is not None:
-            # Get the indices of selected features from original feature list
-            original_feature_cols = feature_cols
-            selected_feature_indices = [original_feature_cols.index(f) for f in feature_names if f in original_feature_cols and '_x_' not in f]
-
-            # Apply same selection
-            X_holdout_selected = X_holdout_raw_full[:, selected_feature_indices]
-
-            # Create same interaction features on holdout
-            X_holdout_with_interactions, _ = adv_eng.create_interaction_features(
-                X_holdout_selected,
-                [original_feature_cols[i] for i in selected_feature_indices],
-                top_k=3
-            )
-
-            logger.info(f"  ✓ Holdout features aligned: {X_holdout_with_interactions.shape[1]} features")
+        logger.info(f"  ✓ Using fixed feature set: {len(feature_names)} features")
 
         # ========== TRAIN/VAL/CALIB SPLIT (TimeSeriesSplit con purging) ==========
         # OPTIMIZATION 3: 10 split per maggiore robustezza e minore overfitting
@@ -1072,13 +1050,13 @@ def train_perfect_model(
         holdout_mae = None
         holdout_dir_accuracy = None
 
-        if X_holdout_raw_full is not None:
+        if X_holdout_selected is not None:
             logger.info(f"\n{'='*70}")
             logger.info("🎯 FINAL HOLDOUT TEST (12 MONTHS - NEVER SEEN!)")
             logger.info(f"{'='*70}")
 
             # Apply scaling (features already selected above)
-            X_holdout_scaled = scaler.transform(X_holdout_with_interactions)
+            X_holdout_scaled = scaler.transform(X_holdout_selected)
 
             # Get predictions from level-1 models
             level1_preds_holdout = []
@@ -1148,7 +1126,7 @@ def train_perfect_model(
                 # FINAL HOLDOUT RESULTS (12-month out-of-sample - NEVER SEEN!)
                 'holdout_mae': float(holdout_mae) if holdout_mae is not None else None,
                 'holdout_directional_accuracy': float(holdout_dir_accuracy) if holdout_dir_accuracy is not None else None,
-                'holdout_samples': int(len(y_holdout)) if X_holdout_raw_full is not None else None
+                'holdout_samples': int(len(y_holdout)) if X_holdout_selected is not None else None
             },
             'hyperparameters': best_params,
             'features': feature_names

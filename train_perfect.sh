@@ -24,7 +24,7 @@ PARALLEL="1"
 PERIOD="10y"          # Fetch 10 years for good local cache
 ROLLING_WINDOW="true" # Enable rolling window by default
 WINDOW_YEARS="2"      # Use only most recent 2 years for training → AV AUC ~0.70
-HOLDOUT_MONTHS="6"    # 6 months holdout for 2y training (12 cycles of 5-day predictions)
+HOLDOUT_MONTHS="3"    # 3 months holdout for 2y training (12 cycles of 5-day predictions)
 OUTPUT="data/models/pretrained_perfect"
 
 # Parse arguments
