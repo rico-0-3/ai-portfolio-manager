@@ -407,16 +407,43 @@ class PortfolioOrchestrator:
                 # Add technical indicators (EXACTLY as in training)
                 df = self.tech_indicators.add_all_indicators(df)
 
+                # Remove long-horizon / leakage-prone indicators to mirror training
+                leaky_features = [
+                    'SMA_200', 'EMA_200', 'VWAP',
+                    'Ichimoku_Senkou_A', 'Ichimoku_Senkou_B',
+                    'KC_Lower', 'KC_Upper', 'KC_Middle',
+                    'BB_Lower',
+                    'Volume_rolling_std_60', 'Volume_rolling_mean_60',
+                    'Volume_rolling_std_42', 'Volume_rolling_mean_42',
+                    'Return_rolling_skew_60', 'Return_rolling_kurt_42',
+                ]
+                drop_candidates = [feat for feat in leaky_features if feat in df.columns]
+                if drop_candidates:
+                    self.logger.debug(f"{ticker}: dropping leakage-prone features {drop_candidates}")
+                    df = df.drop(columns=drop_candidates)
+
                 # Add detrending features (EXACTLY as in training)
-                df['trend_60d'] = df['Close'].rolling(60, min_periods=20).mean().shift(1)
-                df['distance_from_trend'] = (df['Close'] - df['trend_60d']) / (df['trend_60d'] + 1e-8)
+                df['trend_40d'] = df['Close'].rolling(40, min_periods=15).mean().shift(1)
+                df['distance_from_trend_40d'] = (df['Close'] - df['trend_40d']) / (df['trend_40d'] + 1e-8)
                 df['trend_20d'] = df['Close'].rolling(20, min_periods=10).mean().shift(1)
                 df['distance_from_trend_20d'] = (df['Close'] - df['trend_20d']) / (df['trend_20d'] + 1e-8)
                 
                 # Add advanced features (EXACTLY as in training)
                 df = adv_eng.create_lag_features(df, lags=[1, 5, 21])
-                df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 60])
-                df = adv_eng.create_fourier_features(df, periods=[5, 10, 21, 252])
+                df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 42])
+                df = adv_eng.create_fourier_features(df, periods=[5, 10, 21])
+
+                # Rolling z-score normalization identical to training
+                normalization_columns = [
+                    col for col in df.columns
+                    if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
+                ]
+                df = adv_eng.apply_rolling_zscore(
+                    df,
+                    normalization_columns,
+                    window=126,
+                    min_periods=30,
+                )
                 
                 # Clean data (EXACTLY as in training)
                 df = df.replace([np.inf, -np.inf], np.nan)

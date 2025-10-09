@@ -67,6 +67,7 @@ from src.utils.config_loader import ConfigLoader
 from src.data.market_data import MarketDataFetcher
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.feature_engineering import FeatureEngineer
+from src.features.advanced_feature_engineering import AdvancedFeatureEngineer
 
 # ML imports
 try:
@@ -162,102 +163,6 @@ SP500_TOP50 = [
     # === CHINESE TECH (Alta volatilità geopolitica) ===
     'BABA',  # Alibaba - E-commerce cinese
 ]
-
-class AdvancedFeatureEngineer:
-    """Advanced feature engineering beyond basic technical indicators."""
-
-    def __init__(self):
-        self.poly_features = None
-        self.selected_features_for_interaction = None
-
-    def create_lag_features(self, df: pd.DataFrame, lags: List[int] = [1, 5, 21]) -> pd.DataFrame:
-        """Create lagged features."""
-        logger.info(f"  Creating lag features: {lags}")
-
-        for lag in lags:
-            df[f'Close_lag_{lag}'] = df['Close'].shift(lag)
-            df[f'Volume_lag_{lag}'] = df['Volume'].shift(lag)
-            df[f'Return_lag_{lag}'] = df['Close'].pct_change(lag)
-
-        return df
-
-    def create_rolling_statistics(self, df: pd.DataFrame, windows: List[int] = [5, 10, 21, 60]) -> pd.DataFrame:
-        """Create rolling statistical features."""
-        logger.info(f"  Creating rolling statistics: {windows}")
-
-        for window in windows:
-            # Mean and std
-            df[f'Close_rolling_mean_{window}'] = df['Close'].rolling(window).mean()
-            df[f'Close_rolling_std_{window}'] = df['Close'].rolling(window).std()
-
-            # Skewness and kurtosis
-            df[f'Return_rolling_skew_{window}'] = df['Close'].pct_change().rolling(window).skew()
-            df[f'Return_rolling_kurt_{window}'] = df['Close'].pct_change().rolling(window).kurt()
-
-            # Volume statistics
-            df[f'Volume_rolling_mean_{window}'] = df['Volume'].rolling(window).mean()
-            df[f'Volume_rolling_std_{window}'] = df['Volume'].rolling(window).std()
-
-        return df
-
-    def create_fourier_features(self, df: pd.DataFrame, periods: List[int] = [5, 10, 21, 252]) -> pd.DataFrame:
-        """Create Fourier transform features for seasonality."""
-        logger.info(f"  Creating Fourier features: {periods}")
-
-        close_prices = df['Close'].fillna(method='ffill').fillna(method='bfill').values
-
-        for period in periods:
-            # Sine and cosine components
-            df[f'Fourier_sin_{period}'] = np.sin(2 * np.pi * np.arange(len(df)) / period)
-            df[f'Fourier_cos_{period}'] = np.cos(2 * np.pi * np.arange(len(df)) / period)
-
-        return df
-
-    def create_polynomial_features(self, X: np.ndarray, feature_names: List[str], degree: int = 2) -> Tuple[np.ndarray, List[str]]:
-        """Create polynomial features (degree 2)."""
-        logger.info(f"  Creating polynomial features (degree {degree})...")
-
-        # Only use top features to avoid explosion
-        if X.shape[1] > 20:
-            logger.warning(f"  Too many features ({X.shape[1]}), using top 20 for polynomial")
-            X = X[:, :20]
-            feature_names = feature_names[:20]
-
-        self.poly_features = PolynomialFeatures(degree=degree, include_bias=False, interaction_only=False)
-        X_poly = self.poly_features.fit_transform(X)
-        poly_feature_names = self.poly_features.get_feature_names_out(feature_names)
-
-        logger.info(f"  Polynomial features: {X.shape[1]} → {X_poly.shape[1]}")
-
-        return X_poly, list(poly_feature_names)
-
-    def create_interaction_features(self, X: np.ndarray, feature_names: List[str], top_k: int = 10) -> Tuple[np.ndarray, List[str]]:
-        """Create interaction features between top features."""
-        logger.info(f"  Creating interaction features (top {top_k})...")
-
-        # Select top k features
-        top_features = X[:, :min(top_k, X.shape[1])]
-        top_feature_names = feature_names[:min(top_k, len(feature_names))]
-
-        interaction_features = []
-        interaction_names = []
-
-        for i in range(len(top_feature_names)):
-            for j in range(i+1, len(top_feature_names)):
-                interaction = top_features[:, i] * top_features[:, j]
-                interaction_features.append(interaction)
-                interaction_names.append(f"{top_feature_names[i]}_x_{top_feature_names[j]}")
-
-        if interaction_features:
-            X_interactions = np.column_stack(interaction_features)
-            X_combined = np.hstack([X, X_interactions])
-            combined_names = feature_names + interaction_names
-
-            logger.info(f"  Interaction features: {X.shape[1]} → {X_combined.shape[1]} (added {len(interaction_names)})")
-            return X_combined, combined_names
-        else:
-            return X, feature_names
-
 
 def purged_time_series_split(n_samples: int, n_splits: int = 5, embargo_pct: float = 0.02):
     """
@@ -842,11 +747,55 @@ def train_perfect_model(
         tech_ind = TechnicalIndicators()
         df = tech_ind.add_all_indicators(df)
 
+        # Remove high-leakage long horizon features if present
+        try:
+            leaky_features = [
+                'SMA_200',
+                'VWAP',
+                'EMA_200',
+                'Ichimoku_Senkou_A',
+                'Ichimoku_Senkou_B',
+                'KC_Lower',
+                'KC_Upper',
+                'KC_Middle',
+                'BB_Lower',
+                'Volume_rolling_std_60',
+                'Volume_rolling_mean_60',
+                'Volume_rolling_std_42',
+                'Volume_rolling_mean_42',
+                'Return_rolling_skew_60',
+                'Return_rolling_kurt_42',
+            ]
+            candidates = [feat for feat in leaky_features if feat in df.columns]
+            if candidates:
+                logger.info(
+                    "  🔒 Removing long-horizon features prone to regime leakage: %s",
+                    candidates,
+                )
+                df = df.drop(columns=candidates)
+        except Exception as leak_err:
+            logger.warning(f"  ⚠️ Skipped leaky feature removal: {leak_err}")
+
+        leaky_features = [
+            'SMA_200',
+            'VWAP',
+            'Ichimoku_Senkou_A',
+            'KC_Lower',
+            'BB_Lower',
+            'Volume_rolling_std_60',
+            'Volume_rolling_mean_60',
+            'Return_rolling_skew_60',
+        ]
+        existing_leaky = [feat for feat in leaky_features if feat in df.columns]
+        if existing_leaky:
+            logger.info(f"  🔒 Removing long-horizon features prone to regime leakage: {existing_leaky}")
+            df = df.drop(columns=existing_leaky)
+
         # OPTIMIZATION 0: Detrending (reduces long-term drift)
         # Use SHORT-TERM trends (20-60 days) instead of long-term (252 days)
         # These are MORE ROBUST to temporal regime changes → lower AV AUC
-        df['trend_60d'] = df['Close'].rolling(60, min_periods=20).mean().shift(1)  # No look-ahead
-        df['distance_from_trend'] = (df['Close'] - df['trend_60d']) / (df['trend_60d'] + 1e-8)
+        df['trend_40d'] = df['Close'].rolling(40, min_periods=15).mean().shift(1)  # No look-ahead
+        df['distance_from_trend_40d'] = (df['Close'] - df['trend_40d']) / (df['trend_40d'] + 1e-8)
 
         # Shorter trends for multi-scale analysis (more responsive, less regime-dependent)
         df['trend_20d'] = df['Close'].rolling(20, min_periods=10).mean().shift(1)
@@ -856,8 +805,15 @@ def train_perfect_model(
         # These features are less sensitive to market regime changes
         adv_eng = AdvancedFeatureEngineer()
         df = adv_eng.create_lag_features(df, lags=[1, 5, 21])  # Short lags only
-        df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 60])  # Skip long windows like 252
+        df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 42])  # Skip long windows like 252
         df = adv_eng.create_fourier_features(df, periods=[5, 10, 21])  # Remove 252-day cycle (too long-term)
+
+        # Normalize engineered features with rolling z-score (uses past-only stats → no leakage)
+        normalization_columns = [
+            col for col in df.columns
+            if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
+        ]
+        df = adv_eng.apply_rolling_zscore(df, normalization_columns, window=126, min_periods=30)
 
         # Clean data
         df = df.replace([np.inf, -np.inf], np.nan)
@@ -992,13 +948,16 @@ def train_perfect_model(
 
             logger.info(f"  ✓ Holdout features aligned: {X_holdout_with_interactions.shape[1]} features")
 
-        # ========== TRAIN/VAL/CALIB SPLIT (TimeSeriesSplit with purging) ==========
-        # OPTIMIZATION 3: Increase splits from 5 → 10 for more robust validation
-        # More splits = less overfitting, more realistic out-of-sample performance
-        # FIX 2024-2025: Use 3-way split to prevent calibration overfitting
-        # ADVERSARIAL FIX: Reduce embargo from 2% → 0.5% to decrease train/test separation
-        # (lower embargo = more temporal overlap = lower adversarial AUC)
-        splits = list(purged_time_series_split(n_samples=len(X_raw), n_splits=10, embargo_pct=0.005))
+        # ========== TRAIN/VAL/CALIB SPLIT (TimeSeriesSplit con purging) ==========
+        # OPTIMIZATION 3: 10 split per maggiore robustezza e minore overfitting
+        # ADVERSARIAL FIX: embargo elevato (1%) per ridurre la separazione temporale estrema
+        splits = list(
+            purged_time_series_split(
+                n_samples=len(X_raw),
+                n_splits=10,
+                embargo_pct=0.01,
+            )
+        )
 
         # Use last TWO splits: second-to-last for validation, last for calibration
         train_idx, val_idx = splits[-2]  # Second-to-last split for validation

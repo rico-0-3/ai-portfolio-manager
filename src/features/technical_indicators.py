@@ -72,7 +72,7 @@ class TechnicalIndicators:
 
     def add_moving_averages(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add Simple and Exponential Moving Averages."""
-        periods = [5, 10, 20, 50, 100, 200]
+        periods = [5, 10, 20, 50, 100]
 
         for period in periods:
             if TALIB_AVAILABLE:

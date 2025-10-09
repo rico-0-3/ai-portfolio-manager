@@ -42,8 +42,9 @@ class AdvancedFeatureEngineer:
             df[f'Return_rolling_kurt_{window}'] = df['Close'].pct_change().rolling(window).kurt()
 
             # Volume statistics
-            df[f'Volume_rolling_mean_{window}'] = df['Volume'].rolling(window).mean()
-            df[f'Volume_rolling_std_{window}'] = df['Volume'].rolling(window).std()
+            if window <= 21:
+                df[f'Volume_rolling_mean_{window}'] = df['Volume'].rolling(window).mean()
+                df[f'Volume_rolling_std_{window}'] = df['Volume'].rolling(window).std()
 
         return df
 
@@ -57,6 +58,50 @@ class AdvancedFeatureEngineer:
             # Sine and cosine components
             df[f'Fourier_sin_{period}'] = np.sin(2 * np.pi * np.arange(len(df)) / period)
             df[f'Fourier_cos_{period}'] = np.cos(2 * np.pi * np.arange(len(df)) / period)
+
+        return df
+
+    def apply_rolling_zscore(
+        self,
+        df: pd.DataFrame,
+        feature_columns: List[str],
+        window: int = 126,
+        min_periods: int = 30,
+        min_valid_ratio: float = 0.4,
+    ) -> pd.DataFrame:
+        """Normalize features using rolling z-score without look-ahead."""
+        if not feature_columns:
+            return df
+
+        logger.debug(
+            "  Applying rolling z-score normalization (window=%d, min_periods=%d) to %d features",
+            window,
+            min_periods,
+            len(feature_columns),
+        )
+
+        subset = df[feature_columns]
+        rolling_mean = subset.rolling(window=window, min_periods=min_periods).mean().shift(1)
+        rolling_std = subset.rolling(window=window, min_periods=min_periods).std().shift(1)
+
+        # Avoid division by zero; replace zeros with NaN so they can be filtered out
+        rolling_std = rolling_std.replace(0, np.nan)
+
+        normalized = (subset - rolling_mean) / rolling_std
+
+        min_valid_count = max(int(len(df) * min_valid_ratio), min_periods)
+        valid_cols = [col for col in feature_columns if normalized[col].notna().sum() >= min_valid_count]
+
+        if valid_cols:
+            df.loc[:, valid_cols] = normalized[valid_cols]
+        dropped_cols = sorted(set(feature_columns) - set(valid_cols))
+        if dropped_cols:
+            logger.debug(
+                "  Dropping %d features due to insufficient rolling coverage: %s",
+                len(dropped_cols),
+                ", ".join(dropped_cols[:10]) + ("..." if len(dropped_cols) > 10 else ""),
+            )
+            df = df.drop(columns=dropped_cols)
 
         return df
 
