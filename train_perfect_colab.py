@@ -900,27 +900,45 @@ def train_perfect_model(
 
         # Configurable holdout period via function attribute (set by main)
         # Default: 12 months (252 days) for robust out-of-sample validation
-        # Can increase to 18-24 months if you want more conservative evaluation
-        HOLDOUT_DAYS = getattr(train_perfect_model, 'holdout_days', 252)
-        MIN_TRAIN_DAYS = 200  # Minimum training data needed (relaxed from 500)
+        REQUESTED_HOLDOUT_DAYS = getattr(train_perfect_model, 'holdout_days', 252)
+        MIN_TRAIN_DAYS = 150  # Absolute minimum training data (6 months)
+        MIN_HOLDOUT_DAYS = 21  # Minimum holdout (1 month = ~4 prediction cycles)
         
         total_rows = len(df)
 
-        # Check if we have enough data for holdout + minimum training
+        # 🧠 INTELLIGENT HOLDOUT SCALING
+        # Calculate optimal holdout based on available data
+        # Rule: Use 20-25% of data for holdout, but ensure minimum training data
+        max_holdout = total_rows - MIN_TRAIN_DAYS  # Max we can afford
+        optimal_holdout = min(REQUESTED_HOLDOUT_DAYS, int(total_rows * 0.25))  # 25% rule
+        HOLDOUT_DAYS = max(MIN_HOLDOUT_DAYS, min(optimal_holdout, max_holdout))
+        
         holdout_months = HOLDOUT_DAYS / 21  # ~21 trading days per month
-        if total_rows < HOLDOUT_DAYS + MIN_TRAIN_DAYS:
-            logger.warning(f"  ⚠️  Insufficient data for {holdout_months:.0f}-month holdout ({total_rows} rows)")
-            logger.warning(f"  Required: {HOLDOUT_DAYS} holdout + {MIN_TRAIN_DAYS} training = {HOLDOUT_DAYS + MIN_TRAIN_DAYS} minimum")
-            logger.warning(f"  Proceeding without holdout test set (NOT RECOMMENDED!)")
-            df_holdout = None
-            df_training = df
-        else:
-            df_holdout = df.iloc[-HOLDOUT_DAYS:].copy()  # Last N months
-            df_training = df.iloc[:-HOLDOUT_DAYS].copy()  # Everything before holdout
 
-            training_years = len(df_training) / 252  # Approximate years
-            logger.info(f"  ✓ Holdout set: {len(df_holdout)} rows ({holdout_months:.0f} months - NEVER SEEN)")
-            logger.info(f"  ✓ Training set: {len(df_training)} rows (~{training_years:.1f} years of data)")
+        # Check if we have absolute minimum data
+        if total_rows < MIN_TRAIN_DAYS + MIN_HOLDOUT_DAYS:
+            logger.error(f"  ❌ CRITICAL: Insufficient data ({total_rows} rows)")
+            logger.error(f"  Required: {MIN_TRAIN_DAYS} training + {MIN_HOLDOUT_DAYS} holdout = {MIN_TRAIN_DAYS + MIN_HOLDOUT_DAYS} minimum")
+            logger.error(f"  This ticker has too little data for reliable training!")
+            return None
+        
+        # Adaptive holdout
+        if HOLDOUT_DAYS < REQUESTED_HOLDOUT_DAYS:
+            logger.warning(f"  ⚠️  Requested {REQUESTED_HOLDOUT_DAYS / 21:.1f} months, but only {total_rows} rows available")
+            logger.info(f"  🧠 Auto-adjusted holdout to {holdout_months:.1f} months ({HOLDOUT_DAYS} days)")
+            logger.info(f"     Reason: Preserve {MIN_TRAIN_DAYS} days for training")
+        
+        df_holdout = df.iloc[-HOLDOUT_DAYS:].copy()  # Last N months
+        df_training = df.iloc[:-HOLDOUT_DAYS].copy()  # Everything before holdout
+
+        training_years = len(df_training) / 252  # Approximate years
+        logger.info(f"  ✓ Holdout set: {len(df_holdout)} rows ({holdout_months:.1f} months - NEVER SEEN)")
+        logger.info(f"  ✓ Training set: {len(df_training)} rows (~{training_years:.1f} years of data)")
+        
+        # Calculate prediction cycles for context
+        prediction_horizon = 5  # days (target is 5-day return)
+        cycles = HOLDOUT_DAYS // prediction_horizon
+        logger.info(f"  📊 Holdout covers ~{cycles} prediction cycles ({prediction_horizon}-day horizon)")
 
         # ========== PREPARE DATA ==========
         feature_cols = [col for col in df_training.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']]
