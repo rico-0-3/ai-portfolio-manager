@@ -154,29 +154,6 @@ echo "==========================================================================
 echo -e "              ${BLUE}AI PORTFOLIO MANAGER - PREDICTION ENGINE${NC}"
 echo "================================================================================"
 echo ""
-echo "📊 Configuration:"
-echo "  Tickers:           ${TICKERS[*]}"
-if [ -n "$BUDGET" ]; then
-    echo "  Budget:            \$${BUDGET}"
-else
-    echo "  Budget:            From config.yaml"
-fi
-echo "  Data Period:       ${PERIOD}"
-if [ -n "$RISK_PROFILE" ]; then
-    echo "  Risk Profile:      ${RISK_PROFILE}"
-else
-    echo "  Risk Profile:      From config.yaml"
-fi
-echo "  ML Predictions:    ${USE_ML}"
-echo "  Pretrained Models: ${USE_PRETRAINED}"
-if [ "$USE_PRETRAINED" = "true" ]; then
-    echo "  Fine-tune Days:    ${FINETUNE_DAYS}"
-fi
-if [ -n "$OUTPUT_FILE" ]; then
-    echo "  Output File:       ${OUTPUT_FILE}"
-fi
-echo ""
-echo "================================================================================"
 
 # Activate virtual environment
 if [ ! -d "venv" ]; then
@@ -313,13 +290,6 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "================================================================================"
     echo -e "${GREEN}                    PREDICTION COMPLETED SUCCESSFULLY${NC}"
     echo "================================================================================"
-    echo ""
-    echo "💡 Tips:"
-    echo "  • Review the allocation before investing real money"
-    echo "  • Consider your risk tolerance and investment goals"
-    echo "  • Diversify across different sectors"
-    echo "  • Rebalance periodically (weekly/monthly)"
-    echo "  • This is for educational purposes - not financial advice"
     echo ""
 else
     echo ""

@@ -1,6 +1,6 @@
 """
 Unified Ensemble Model
-Contains all trained models (XGBoost, LightGBM, LSTM, GRU, LSTM+Attn, Transformer)
+Contains all trained models (XGBoost, LightGBM, CatBoost, LSTM, GRU, Transformer)
 and provides a single .predict() interface.
 """
 
@@ -8,6 +8,13 @@ import numpy as np
 import pickle
 from typing import Dict, List, Optional
 from pathlib import Path
+
+# Try to import PyTorch for deep learning models
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 
 class UnifiedEnsembleModel:
@@ -93,9 +100,28 @@ class UnifiedEnsembleModel:
                 elif model_name == 'catboost':
                     pred = float(model.predict(X_scaled)[0])
 
-                # Future: LSTM, GRU, Transformer
-                # elif model_name == 'lstm':
-                #     pred = model.predict(X_scaled_sequence)[0]
+                # Deep learning models (LSTM, GRU, Transformer)
+                elif model_name in ['lstm', 'gru', 'transformer'] and TORCH_AVAILABLE:
+                    # PyTorch models need sequence data and tensor conversion
+                    # For single prediction, we use the last available sequence
+                    lookback = 20  # Must match training lookback
+                    
+                    if len(X_scaled) >= lookback:
+                        # Create sequence from last 'lookback' samples
+                        X_seq = X_scaled[-lookback:].reshape(1, lookback, -1)
+                        X_tensor = torch.FloatTensor(X_seq)
+                        
+                        # Move to same device as model
+                        device = next(model.parameters()).device
+                        X_tensor = X_tensor.to(device)
+                        
+                        # Predict
+                        model.eval()
+                        with torch.no_grad():
+                            pred = float(model(X_tensor).cpu().numpy())
+                    else:
+                        # Not enough data for sequence, use last available sample
+                        pred = float(model.predict(X_scaled[-1:]).item()) if hasattr(model, 'predict') else 0.0
 
                 else:
                     continue
@@ -160,10 +186,21 @@ class UnifiedEnsembleModel:
         model_names = metadata.get('models', ['xgboost', 'lightgbm'])
 
         for model_name in model_names:
-            model_path = model_dir / f'{model_name}.pkl'
-            if model_path.exists():
-                with open(model_path, 'rb') as f:
-                    models[model_name] = pickle.load(f)
+            # Check for PyTorch models (.pth files)
+            if model_name in ['lstm', 'gru', 'transformer']:
+                model_path = model_dir / f'{model_name}.pth'
+                if model_path.exists() and TORCH_AVAILABLE:
+                    # Load PyTorch state dict
+                    # Note: Model architecture must be reconstructed
+                    # This is handled by loading the full model object
+                    models[model_name] = torch.load(model_path, map_location='cpu')
+                    models[model_name].eval()
+            else:
+                # Standard pickle models (XGBoost, LightGBM, CatBoost)
+                model_path = model_dir / f'{model_name}.pkl'
+                if model_path.exists():
+                    with open(model_path, 'rb') as f:
+                        models[model_name] = pickle.load(f)
 
         # Get ensemble weights
         weights = metadata.get('ensemble_weights', {})
@@ -193,8 +230,13 @@ class UnifiedEnsembleModel:
 
         # Save all models
         for model_name, model in self.models.items():
-            with open(model_dir / f'{model_name}.pkl', 'wb') as f:
-                pickle.dump(model, f)
+            # Save PyTorch models as .pth files
+            if model_name in ['lstm', 'gru', 'transformer'] and TORCH_AVAILABLE:
+                torch.save(model, model_dir / f'{model_name}.pth')
+            else:
+                # Save scikit-learn/XGBoost/LightGBM/CatBoost as pickle
+                with open(model_dir / f'{model_name}.pkl', 'wb') as f:
+                    pickle.dump(model, f)
 
         # Save scaler and features
         with open(model_dir / 'scaler.pkl', 'wb') as f:

@@ -167,8 +167,12 @@ class PortfolioOrchestrator:
             for ticker, data in processed_data.items()
         }).dropna()
 
-        # Market conditions (optional - Phase 2)
-        market_conditions = None
+        # Calculate market conditions for adaptive optimizer weights
+        self.logger.info("  Calculating market conditions...")
+        market_conditions = self._calculate_market_conditions(returns_df)
+        self.logger.info(f"  Market conditions: vol={market_conditions.get('volatility', 0):.3f}, "
+                        f"trend={market_conditions.get('trend', 0):.4f}, "
+                        f"regime={'BULL' if market_conditions.get('regime', 0) > 0 else 'BEAR'}")
 
         # ONE CALL: predictions + portfolio optimization!
         self.logger.info("  Predicting returns and optimizing portfolio...")
@@ -448,6 +452,90 @@ class PortfolioOrchestrator:
                 self.logger.error(f"Feature engineering error for {ticker}: {e}")
 
         return processed_data
+
+    def _calculate_market_conditions(self, returns: pd.DataFrame) -> Dict[str, float]:
+        """
+        Calculate market condition features for adaptive optimizer weight selection.
+
+        Args:
+            returns: DataFrame of historical returns (tickers x time)
+
+        Returns:
+            Dict with market condition features
+        """
+        try:
+            # 1. Volatility (annualized)
+            volatility = returns.std().mean() * np.sqrt(252)
+
+            # 2. Trend (recent 21-day return)
+            recent_return = returns.iloc[-21:].mean().mean() if len(returns) >= 21 else returns.mean().mean()
+
+            # 3. Correlation (average pairwise correlation)
+            corr_matrix = returns.corr()
+            avg_correlation = corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)].mean()
+
+            # 4. Skewness (average)
+            skewness = returns.skew().mean()
+
+            # 5. Kurtosis (average)
+            kurtosis = returns.kurt().mean()
+
+            # 6. VIX proxy (rolling 21-day volatility)
+            if len(returns) >= 21:
+                rolling_vol = returns.rolling(21).std().mean().mean() * np.sqrt(252)
+            else:
+                rolling_vol = volatility
+
+            # 7. Max drawdown
+            cumulative_returns = (1 + returns).cumprod()
+            running_max = cumulative_returns.cummax()
+            drawdown = (cumulative_returns - running_max) / running_max
+            max_drawdown = abs(drawdown.min().mean())
+
+            # 8. Sharpe ratio (recent 60 days)
+            if len(returns) >= 60:
+                recent_sharpe = (returns.iloc[-60:].mean() / returns.iloc[-60:].std()).mean() * np.sqrt(252)
+            else:
+                recent_sharpe = (returns.mean() / returns.std()).mean() * np.sqrt(252)
+
+            # 9. Market regime: Bull (1) or Bear (-1)
+            regime = 1 if recent_return > 0 else -1
+
+            # 10. Diversification ratio (portfolio vol / weighted avg vol)
+            portfolio_vol = returns.mean(axis=1).std()
+            weighted_avg_vol = returns.std().mean()
+            diversification_ratio = weighted_avg_vol / (portfolio_vol + 1e-6)
+
+            market_conditions = {
+                'volatility': float(volatility),
+                'trend': float(recent_return),
+                'correlation': float(avg_correlation),
+                'skewness': float(skewness),
+                'kurtosis': float(kurtosis),
+                'vix': float(rolling_vol),
+                'max_drawdown': float(max_drawdown),
+                'sharpe': float(recent_sharpe),
+                'regime': int(regime),
+                'diversification_ratio': float(diversification_ratio)
+            }
+
+            return market_conditions
+
+        except Exception as e:
+            self.logger.warning(f"Failed to calculate market conditions: {e}, using defaults")
+            # Return default neutral conditions
+            return {
+                'volatility': 0.2,
+                'trend': 0.0,
+                'correlation': 0.5,
+                'skewness': 0.0,
+                'kurtosis': 3.0,
+                'vix': 0.2,
+                'max_drawdown': 0.1,
+                'sharpe': 1.0,
+                'regime': 1,
+                'diversification_ratio': 1.5
+            }
 
     def print_results(self, results: Dict):
         """Print results in clear, concise format."""

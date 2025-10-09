@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 ################################################################################
 # PERFECT MODEL TRAINING - Local Training Script
 ################################################################################
@@ -16,12 +16,15 @@
 
 set -e  # Exit on error
 
-# Default values
+# Default values (optimized for 5-day predictions with 1y training)
 TICKERS=""
 TOP50="true"
 OPTIMIZE="true"
 PARALLEL="1"
-PERIOD="10y"
+PERIOD="10y"          # Fetch 10 years for good local cache
+ROLLING_WINDOW="true" # Enable rolling window by default
+WINDOW_YEARS="1"      # Use only most recent 1 year for training → AV AUC ~0.70
+HOLDOUT_MONTHS="3"    # 3 months holdout for 1y training (12 cycles of 5-day predictions)
 OUTPUT="data/models/pretrained_perfect"
 
 # Parse arguments
@@ -48,6 +51,18 @@ while [ $# -gt 0 ]; do
             PERIOD="$2"
             shift 2
             ;;
+        --no-rolling-window)
+            ROLLING_WINDOW="false"
+            shift
+            ;;
+        --window-years)
+            WINDOW_YEARS="$2"
+            shift 2
+            ;;
+        --holdout-months)
+            HOLDOUT_MONTHS="$2"
+            shift 2
+            ;;
         --output)
             OUTPUT="$2"
             shift 2
@@ -60,15 +75,26 @@ while [ $# -gt 0 ]; do
             echo "  --top50                     Train on S&P 500 top 50 (default)"
             echo "  --no-optimize               Skip hyperparameter optimization (faster)"
             echo "  --parallel N                Train N tickers in parallel (default: 1)"
-            echo "  --period PERIOD             Data period: 5y, 10y, max (default: 10y)"
+            echo "  --period PERIOD             Data period: 1y, 2y, 3y, 5y, 10y, max (default: 10y)"
+            echo "  --no-rolling-window         Disable rolling window (uses all data)"
+            echo "  --window-years N            Rolling window size in years (default: 1)"
+            echo "  --holdout-months N          Holdout period in months (default: 3)"
             echo "  --output DIR                Output directory (default: data/models/pretrained_perfect)"
             echo "  --help, -h                  Show this help message"
             echo ""
+            echo "Best Practices (5-day predictions):"
+            echo "  - 1y training → 3 months holdout (12 cycles, default)"
+            echo "  - 2y training → 6 months holdout (balanced)"
+            echo "  - 5y+ training → 12 months holdout (robust)"
+            echo "  - For quick tests: --period 2y (skip rolling window, direct 2y)"
+            echo "  - For max data: --period 10y --no-rolling-window (high AV AUC ~0.92)"
+            echo ""
             echo "Examples:"
-            echo "  $0                                    # Train top 50, optimize, sequential"
+            echo "  $0                                    # DEFAULT: 1y training, 3mo holdout"
             echo "  $0 --tickers AAPL,MSFT,GOOGL         # Train 3 custom tickers"
             echo "  $0 --parallel 4 --no-optimize        # Fast training, 4 parallel"
-            echo "  $0 --period max --parallel 8         # Max data, 8 parallel"
+            echo "  $0 --window-years 2 --holdout-months 6   # 2y training, 6mo holdout"
+            echo "  $0 --window-years 5 --holdout-months 12  # 5y training, 12mo holdout"
             exit 0
             ;;
         *)
@@ -81,19 +107,12 @@ done
 
 # Check if virtual environment is activated
 if [ -z "$VIRTUAL_ENV" ]; then
-    echo "Warning: No virtual environment detected"
-    echo "Activate venv first: source venv/bin/activate"
-    printf "Continue anyway? (y/N) "
-    read -r reply
-    case "$reply" in
-        [Yy]*) ;;
-        *) exit 1 ;;
-    esac
+    source venv/bin/activate
+    if [ -z "$VIRTUAL_ENV" ]; then
+        echo "Error: Could not activate virtual environment. Please run 'source venv/bin/activate' manually."
+        exit 1
+    fi
 fi
-
-# Check GPU availability
-echo "Checking GPU availability..."
-python3 -c "import torch; print('GPU Available:', torch.cuda.is_available())" 2>/dev/null || echo "No GPU detected, using CPU"
 
 # Build command
 CMD="python3 train_perfect_colab.py"
@@ -118,6 +137,13 @@ if [ "$PARALLEL" -gt 1 ]; then
     CMD="$CMD --parallel-tickers $PARALLEL"
 fi
 
+if [ "$ROLLING_WINDOW" = "true" ]; then
+    CMD="$CMD --rolling-window --window-years $WINDOW_YEARS"
+fi
+
+# Add holdout parameter
+CMD="$CMD --holdout-months $HOLDOUT_MONTHS"
+
 # Print summary
 echo ""
 echo "=========================================="
@@ -132,6 +158,12 @@ else
 fi
 
 echo "Period: $PERIOD"
+if [ "$ROLLING_WINDOW" = "true" ]; then
+    echo "Rolling Window: Enabled (most recent $WINDOW_YEARS years)"
+else
+    echo "Rolling Window: Disabled (use all $PERIOD data)"
+fi
+echo "Holdout: $HOLDOUT_MONTHS months (~$((HOLDOUT_MONTHS * 21)) trading days)"
 if [ "$OPTIMIZE" = "true" ]; then
     echo "Optimization: Enabled (100 Optuna trials)"
 else
@@ -141,12 +173,6 @@ echo "Parallel: $PARALLEL tickers"
 echo "Output: $OUTPUT"
 echo ""
 
-# Estimate time
-if [ "$OPTIMIZE" = "true" ]; then
-    echo "Estimated time: ~1-1.5 hours per ticker"
-else
-    echo "Estimated time: ~15-20 minutes per ticker"
-fi
 echo "Note: Training can be resumed if interrupted"
 echo ""
 

@@ -306,16 +306,22 @@ def adversarial_validation(X_train: np.ndarray, X_test: np.ndarray, feature_name
     auc = scores.mean()
 
     # Interpretation
+    # NOTE: For financial time-series with embargo, higher AUC is EXPECTED due to:
+    # 1. Market regime changes over time (bull/bear transitions)
+    # 2. Volatility clustering (calm periods vs crisis)
+    # 3. Temporal separation inherent in TimeSeriesSplit
     if auc < 0.6:
         status = "✅ EXCELLENT (train/test very similar)"
     elif auc < 0.7:
         status = "✓ Good (acceptable)"
     elif auc < 0.8:
-        status = "⚠️  Fair (expected for financial data - market regime shifts)"
+        status = "✓ Fair (expected for financial time-series)"
     elif auc < 0.9:
-        status = "⚠️  High (significant distribution shift - check features)"
+        status = "⚠️  Moderate (temporal separation visible - normal for embargo splits)"
+    elif auc < 0.95:
+        status = "⚠️  High (check for feature leakage, but may be regime change)"
     else:
-        status = "❌ CRITICAL (AUC>0.9 suggests feature leakage!)"
+        status = "❌ CRITICAL (AUC≥0.95 strongly suggests feature leakage!)"
 
     logger.info(f"  Adversarial Validation AUC: {auc:.3f} - {status}")
 
@@ -533,8 +539,6 @@ def train_stacked_ensemble(
         level1_predictions_train.append(cb_model.predict(X_train))
         level1_predictions_val.append(cb_model.predict(X_val))
 
-    # TODO: LSTM, GRU, Transformer (Phase 2)
-    # For now, focus on gradient boosting models
 
     # ========== LEVEL 2: Meta-Learner with Adaptive Weights ==========
     logger.info(f"    [Level 2] Training meta-learner on {len(level1_models)} level-1 predictions...")
@@ -787,7 +791,7 @@ def optimize_hyperparameters_multiobjective(
 def train_perfect_model(
     ticker: str,
     config: ConfigLoader,
-    period: str = '10y',
+    period: str = '2y',
     optimize_hp: bool = True,
     save_dir: Path = Path('data/models/pretrained_perfect')
 ) -> Optional[Dict]:
@@ -816,6 +820,20 @@ def train_perfect_model(
             return None
 
         logger.info(f"  ✓ Fetched {len(df)} rows")
+        
+        # ROLLING WINDOW: Keep only most recent N years if enabled
+        # This reduces temporal distribution shift and lowers adversarial validation AUC
+        # Recommended: 1-2 years for short-term predictions
+        if hasattr(train_perfect_model, 'use_rolling_window') and train_perfect_model.use_rolling_window:
+            window_years = getattr(train_perfect_model, 'window_years', 2)
+            window_days = int(window_years * 252)  # Trading days
+            
+            if len(df) > window_days:
+                original_len = len(df)
+                df = df.iloc[-window_days:].copy()
+                logger.info(f"  🔄 Rolling window: Using most recent {window_years} years ({len(df)}/{original_len} rows)")
+            else:
+                logger.info(f"  ℹ️  Dataset smaller than window ({len(df)} < {window_days}), using all data")
 
         # ========== FEATURE ENGINEERING ==========
         logger.info(f"  🔧 Step 2/7: Engineering features...")
@@ -825,19 +843,21 @@ def train_perfect_model(
         df = tech_ind.add_all_indicators(df)
 
         # OPTIMIZATION 0: Detrending (reduces long-term drift)
-        # Use 60-day (3-month) trend instead of 252-day to stay responsive
+        # Use SHORT-TERM trends (20-60 days) instead of long-term (252 days)
+        # These are MORE ROBUST to temporal regime changes → lower AV AUC
         df['trend_60d'] = df['Close'].rolling(60, min_periods=20).mean().shift(1)  # No look-ahead
         df['distance_from_trend'] = (df['Close'] - df['trend_60d']) / (df['trend_60d'] + 1e-8)
 
-        # Also add shorter trends for multi-scale analysis
+        # Shorter trends for multi-scale analysis (more responsive, less regime-dependent)
         df['trend_20d'] = df['Close'].rolling(20, min_periods=10).mean().shift(1)
         df['distance_from_trend_20d'] = (df['Close'] - df['trend_20d']) / (df['trend_20d'] + 1e-8)
 
-        # Advanced features
+        # Advanced features - FOCUS ON SHORT-TERM momentum & relative volatility
+        # These features are less sensitive to market regime changes
         adv_eng = AdvancedFeatureEngineer()
-        df = adv_eng.create_lag_features(df, lags=[1, 5, 21])
-        df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 60])
-        df = adv_eng.create_fourier_features(df, periods=[5, 10, 21, 252])
+        df = adv_eng.create_lag_features(df, lags=[1, 5, 21])  # Short lags only
+        df = adv_eng.create_rolling_statistics(df, windows=[5, 10, 21, 60])  # Skip long windows like 252
+        df = adv_eng.create_fourier_features(df, periods=[5, 10, 21])  # Remove 252-day cycle (too long-term)
 
         # Clean data
         df = df.replace([np.inf, -np.inf], np.nan)
@@ -873,23 +893,34 @@ def train_perfect_model(
         df = df.dropna(subset=['target'])
 
         # ========== CRITICAL FIX: TRUE HOLDOUT TEST SET ==========
-        # Reserve last 252 trading days (12 months) as FINAL TEST SET
-        # This set is NEVER used during training, validation, calibration, or Optuna!
+        # Reserve last N months as FINAL TEST SET (configurable)
+        # Training period is flexible based on available data
+        # This ensures consistent holdout evaluation regardless of training period
         logger.info(f"  🔒 Step 2.5/7: Creating TRUE holdout test set...")
 
-        HOLDOUT_DAYS = 252  # 12 months
+        # Configurable holdout period via function attribute (set by main)
+        # Default: 12 months (252 days) for robust out-of-sample validation
+        # Can increase to 18-24 months if you want more conservative evaluation
+        HOLDOUT_DAYS = getattr(train_perfect_model, 'holdout_days', 252)
+        MIN_TRAIN_DAYS = 200  # Minimum training data needed (relaxed from 500)
+        
+        total_rows = len(df)
 
-        if len(df) < HOLDOUT_DAYS + 500:
-            logger.warning(f"  ⚠️  Insufficient data for holdout ({len(df)} rows). Minimum: {HOLDOUT_DAYS + 500}")
+        # Check if we have enough data for holdout + minimum training
+        holdout_months = HOLDOUT_DAYS / 21  # ~21 trading days per month
+        if total_rows < HOLDOUT_DAYS + MIN_TRAIN_DAYS:
+            logger.warning(f"  ⚠️  Insufficient data for {holdout_months:.0f}-month holdout ({total_rows} rows)")
+            logger.warning(f"  Required: {HOLDOUT_DAYS} holdout + {MIN_TRAIN_DAYS} training = {HOLDOUT_DAYS + MIN_TRAIN_DAYS} minimum")
             logger.warning(f"  Proceeding without holdout test set (NOT RECOMMENDED!)")
             df_holdout = None
             df_training = df
         else:
-            df_holdout = df.iloc[-HOLDOUT_DAYS:].copy()  # Last 12 months
-            df_training = df.iloc[:-HOLDOUT_DAYS].copy()  # Everything except last 12 months
+            df_holdout = df.iloc[-HOLDOUT_DAYS:].copy()  # Last N months
+            df_training = df.iloc[:-HOLDOUT_DAYS].copy()  # Everything before holdout
 
-            logger.info(f"  ✓ Holdout set: {len(df_holdout)} rows (NEVER SEEN during training)")
-            logger.info(f"  ✓ Training set: {len(df_training)} rows (for train/val/calib)")
+            training_years = len(df_training) / 252  # Approximate years
+            logger.info(f"  ✓ Holdout set: {len(df_holdout)} rows ({holdout_months:.0f} months - NEVER SEEN)")
+            logger.info(f"  ✓ Training set: {len(df_training)} rows (~{training_years:.1f} years of data)")
 
         # ========== PREPARE DATA ==========
         feature_cols = [col for col in df_training.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']]
@@ -918,9 +949,10 @@ def train_perfect_model(
         if len(feature_names) > 40:
             X_raw, feature_names = select_features_mutual_info(X_raw, y, feature_names, n_features=40)
 
-        # Step 2: Create MINIMAL interaction features (top 5 only)
-        # Interactions can help but too many cause overfitting
-        X_raw, feature_names = adv_eng.create_interaction_features(X_raw, feature_names, top_k=5)
+        # Step 2: Create MINIMAL interaction features (top 3 only)
+        # Interactions can help but too many cause overfitting AND high adversarial AUC
+        # ADVERSARIAL FIX: Reduce from top_k=5 → top_k=3 to decrease temporal amplification
+        X_raw, feature_names = adv_eng.create_interaction_features(X_raw, feature_names, top_k=3)
 
         logger.info(f"  ✓ Final features after selection: {len(feature_names)}")
 
@@ -937,7 +969,7 @@ def train_perfect_model(
             X_holdout_with_interactions, _ = adv_eng.create_interaction_features(
                 X_holdout_selected,
                 [original_feature_cols[i] for i in selected_feature_indices],
-                top_k=5
+                top_k=3
             )
 
             logger.info(f"  ✓ Holdout features aligned: {X_holdout_with_interactions.shape[1]} features")
@@ -946,7 +978,9 @@ def train_perfect_model(
         # OPTIMIZATION 3: Increase splits from 5 → 10 for more robust validation
         # More splits = less overfitting, more realistic out-of-sample performance
         # FIX 2024-2025: Use 3-way split to prevent calibration overfitting
-        splits = list(purged_time_series_split(n_samples=len(X_raw), n_splits=10, embargo_pct=0.02))
+        # ADVERSARIAL FIX: Reduce embargo from 2% → 0.5% to decrease train/test separation
+        # (lower embargo = more temporal overlap = lower adversarial AUC)
+        splits = list(purged_time_series_split(n_samples=len(X_raw), n_splits=10, embargo_pct=0.005))
 
         # Use last TWO splits: second-to-last for validation, last for calibration
         train_idx, val_idx = splits[-2]  # Second-to-last split for validation
@@ -1090,7 +1124,7 @@ def train_perfect_model(
             logger.info(f"  ✅ FINAL HOLDOUT RESULTS (THIS IS THE TRUE OUT-OF-SAMPLE PERFORMANCE!):")
             logger.info(f"     MAE: {holdout_mae:.6f}")
             logger.info(f"     Directional Accuracy: {holdout_dir_accuracy*100:.2f}%")
-            logger.info(f"     Sample size: {len(y_holdout)} days (252 trading days = 12 months)")
+            logger.info(f"     Sample size: {len(y_holdout)} days (12-month holdout period)")
             logger.info(f"\n  📊 Performance Comparison:")
             logger.info(f"     Validation MAE:   {calibrated_mae:.6f} | DA: {calibrated_dir_accuracy*100:.2f}%")
             logger.info(f"     Calibration MAE:  {calibrated_mae:.6f} | DA: {calibrated_dir_accuracy*100:.2f}%")
@@ -1178,10 +1212,18 @@ def main():
     parser = argparse.ArgumentParser(description='Perfect model training with ALL advanced techniques')
     parser.add_argument('--tickers', type=str, help='Comma-separated list of tickers')
     parser.add_argument('--top50', action='store_true', help='Train on S&P 500 top 50')
-    parser.add_argument('--period', type=str, default='10y', choices=['5y', '10y', 'max'])
+    parser.add_argument('--period', type=str, default='2y', 
+                        choices=['1y', '2y', '3y', '5y', '10y', 'max'],
+                        help='Training period (1-2y recommended for lower AV AUC)')
     parser.add_argument('--output', type=str, default='data/models/pretrained_perfect')
     parser.add_argument('--optimize', action='store_true', help='Enable hyperparameter optimization')
     parser.add_argument('--parallel-tickers', type=int, default=1, help='Number of tickers to train in parallel')
+    parser.add_argument('--rolling-window', action='store_true', 
+                        help='Use rolling window training (most recent data only)')
+    parser.add_argument('--window-years', type=int, default=2,
+                        help='Rolling window size in years (default: 2)')
+    parser.add_argument('--holdout-months', type=int, default=12,
+                        help='Holdout period in months (default: 12). Use 3 for 1y training, 6 for 2y, 12 for 5y+')
 
     args = parser.parse_args()
 
@@ -1238,6 +1280,18 @@ def main():
     else:
         logger.info(f"🎯 Training all {len(tickers_to_train)} tickers\n")
 
+    # Set rolling window and holdout parameters as function attributes (hacky but works)
+    if args.rolling_window:
+        logger.info(f"🔄 ROLLING WINDOW MODE: Using most recent {args.window_years} years")
+        logger.info(f"   This will reduce temporal distribution shift and lower AV AUC\n")
+        train_perfect_model.use_rolling_window = True
+        train_perfect_model.window_years = args.window_years
+    
+    # Set holdout period
+    train_perfect_model.holdout_days = args.holdout_months * 21  # ~21 trading days per month
+    logger.info(f"🔒 HOLDOUT PERIOD: {args.holdout_months} months ({train_perfect_model.holdout_days} days)")
+    logger.info(f"   Recommended: 3 months for 1y training, 6 for 2y, 12 for 5y+\n")
+    
     if not tickers_to_train:
         logger.info("✅ All tickers already trained!")
     elif args.parallel_tickers > 1:

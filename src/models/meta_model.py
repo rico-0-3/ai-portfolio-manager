@@ -77,6 +77,15 @@ class MetaModel:
 
                 # Predict
                 pred = ensemble_model.predict(X_test, feature_cols)
+                
+                # CRITICAL: Validate prediction is not NaN
+                if pd.isna(pred):
+                    logger.error(f"{ticker}: prediction is NaN! Skipping ticker")
+                    logger.error(f"  Model: {ensemble_model}")
+                    logger.error(f"  Features shape: {X_test.shape}")
+                    logger.error(f"  Feature names: {feature_cols[:5]}...")
+                    continue
+                
                 predictions[ticker] = pred
 
                 logger.debug(f"{ticker}: prediction = {pred*100:+.2f}%")
@@ -122,8 +131,49 @@ class MetaModel:
 
         optimizer = PortfolioOptimizer(risk_free_rate=0.02)
 
-        # Convert predictions to expected return format
-        expected_returns = pd.Series(predictions)
+        # Convert predictions to Dict format (required by optimizer methods)
+        # Some methods expect Dict[str, float], not pd.Series
+        if isinstance(predictions, pd.Series):
+            expected_returns_dict = predictions.to_dict()
+        else:
+            expected_returns_dict = predictions
+
+        # CRITICAL: Filter out NaN predictions BEFORE passing to optimizer
+        # NaN predictions cause "Input contains NaN" errors in Markowitz
+        clean_predictions = {}
+        nan_tickers = []
+        
+        logger.debug(f"Filtering predictions: {expected_returns_dict}")
+        
+        for ticker, pred in expected_returns_dict.items():
+            if pd.isna(pred):
+                nan_tickers.append(ticker)
+                logger.warning(f"Prediction for {ticker} is NaN (value={pred}), excluding from optimization")
+            else:
+                clean_predictions[ticker] = pred
+
+        if nan_tickers:
+            logger.warning(f"Excluded {len(nan_tickers)} tickers with NaN predictions: {nan_tickers}")
+            logger.warning(f"Original predictions dict: {expected_returns_dict}")
+            logger.warning(f"Clean predictions dict: {clean_predictions}")
+
+        # If all predictions are NaN, fallback to equal weights
+        if not clean_predictions:
+            logger.error("All predictions are NaN! Using equal weights on all tickers")
+            tickers = list(expected_returns_dict.keys())
+            return {ticker: 1.0 / len(tickers) for ticker in tickers}
+
+        # Filter historical_returns to match clean predictions
+        valid_tickers = list(clean_predictions.keys())
+        historical_returns = historical_returns[valid_tickers]
+        expected_returns_dict = clean_predictions
+
+        # FINAL VALIDATION: Double-check no NaN in clean predictions
+        assert all(not pd.isna(v) for v in expected_returns_dict.values()), \
+            f"CRITICAL: NaN found in clean_predictions! {expected_returns_dict}"
+
+        logger.info(f"Optimizing portfolio with {len(expected_returns_dict)} valid predictions")
+        logger.debug(f"Final predictions passed to optimizer: {expected_returns_dict}")
 
         # Calculate weights from each optimization method
         method_weights = {}
@@ -133,19 +183,20 @@ class MetaModel:
             try:
                 mw = optimizer.markowitz_optimization(
                     returns=historical_returns,
-                    ml_predictions=expected_returns
+                    ml_predictions=expected_returns_dict
                 )
                 method_weights['markowitz'] = mw
                 logger.debug(f"Markowitz weights: {mw}")
             except Exception as e:
                 logger.warning(f"Markowitz failed: {e}")
 
-        # 2. Black-Litterman
+        # 2. Black-Litterman (uses ml_predictions as views)
         if optimizer_weights.get('black_litterman', 0) > 0:
             try:
+                # Black-Litterman uses 'views' parameter, not 'ml_predictions'
                 blw = optimizer.black_litterman_optimization(
                     returns=historical_returns,
-                    ml_predictions=expected_returns
+                    views=expected_returns_dict  # ml_predictions as absolute views
                 )
                 method_weights['black_litterman'] = blw
                 logger.debug(f"Black-Litterman weights: {blw}")
@@ -157,7 +208,7 @@ class MetaModel:
             try:
                 rpw = optimizer.risk_parity_optimization(
                     returns=historical_returns,
-                    ml_predictions=expected_returns
+                    ml_predictions=expected_returns_dict
                 )
                 method_weights['risk_parity'] = rpw
                 logger.debug(f"Risk Parity weights: {rpw}")
@@ -169,7 +220,7 @@ class MetaModel:
             try:
                 cw = optimizer.cvar_optimization(
                     returns=historical_returns,
-                    ml_predictions=expected_returns,
+                    ml_predictions=expected_returns_dict,
                     alpha=0.05
                 )
                 method_weights['cvar'] = cw
@@ -177,10 +228,18 @@ class MetaModel:
             except Exception as e:
                 logger.warning(f"CVaR failed: {e}")
 
-        # 5. RL Agent (placeholder - will be trained in Phase 2)
+        # 5. RL Agent (Reinforcement Learning - PPO)
         if optimizer_weights.get('rl_agent', 0) > 0:
-            logger.warning("RL Agent not yet implemented, skipping")
-            # TODO: Implement RL agent portfolio optimization
+            try:
+                rlw = optimizer.rl_agent_optimization(
+                    returns=historical_returns,
+                    ml_predictions=expected_returns_dict,
+                    training_steps=10000  # 10k steps is reasonable for portfolio optimization
+                )
+                method_weights['rl_agent'] = rlw
+                logger.debug(f"RL Agent weights: {rlw}")
+            except Exception as e:
+                logger.warning(f"RL Agent failed: {e}")
 
         # If no methods succeeded, fallback to equal weights
         if not method_weights:
@@ -244,15 +303,113 @@ class MetaModel:
         """
         Use ML model to predict optimal optimizer method weights based on market conditions.
 
+        Strategy:
+        1. If ML model exists (optimizer_weights_predictor), use it
+        2. Otherwise, use rule-based adaptive weights based on market regime
+
+        Research-backed rules:
+        - High volatility + bear market: Risk Parity (40%) + CVaR (35%)
+        - Low volatility + bull market: Markowitz (35%) + Black-Litterman (30%)
+        - High correlation: Risk Parity (more diversification needed)
+        - Trending market: Black-Litterman (incorporate views) + RL Agent
+        - Uncertain/Mixed: Balanced ensemble
+
         Args:
             market_conditions: {'vix': 18.5, 'market_return_1m': 0.02, 'volatility': 0.15, ...}
 
         Returns:
             {'markowitz': 0.3, 'black_litterman': 0.2, ...}
         """
-        # TODO: Implement ML predictor (Phase 2)
-        # For now, return static config
-        return self.portfolio_optimizer_config
+        # If ML model exists, use it
+        if self.optimizer_weights_predictor is not None:
+            try:
+                from src.models.portfolio_optimizer_ml import PortfolioOptimizerML
+                
+                if isinstance(self.optimizer_weights_predictor, PortfolioOptimizerML):
+                    weights = self.optimizer_weights_predictor.predict(
+                        market_conditions=market_conditions
+                    )
+                    logger.info(f"ML-predicted weights: {weights}")
+                    return weights
+            except Exception as e:
+                logger.warning(f"ML weight prediction failed: {e}, falling back to rule-based")
+
+        # Rule-based adaptive weights based on market conditions
+        volatility = market_conditions.get('volatility', 0.2)
+        trend = market_conditions.get('trend', 0.0)
+        correlation = market_conditions.get('correlation', 0.5)
+        vix = market_conditions.get('vix', 0.2)
+        regime = market_conditions.get('regime', 1)  # 1 = bull, -1 = bear
+        max_drawdown = market_conditions.get('max_drawdown', 0.1)
+
+        # Initialize weights
+        weights = {
+            'markowitz': 0.0,
+            'black_litterman': 0.0,
+            'risk_parity': 0.0,
+            'cvar': 0.0,
+            'rl_agent': 0.0
+        }
+
+        # Detect market regime
+        high_volatility = volatility > 0.25 or vix > 0.3
+        bear_market = regime < 0 or trend < -0.02
+        bull_market = regime > 0 and trend > 0.02
+        high_correlation = correlation > 0.7
+        high_drawdown = max_drawdown > 0.15
+
+        # SCENARIO 1: Crisis Mode (high vol + bear + high drawdown)
+        if high_volatility and (bear_market or high_drawdown):
+            logger.info("Market regime: CRISIS - defensive portfolio")
+            weights['cvar'] = 0.40          # Focus on tail risk
+            weights['risk_parity'] = 0.35   # Diversification
+            weights['black_litterman'] = 0.15  # Some tactical views
+            weights['markowitz'] = 0.05     # Minimal MVO
+            weights['rl_agent'] = 0.05      # Adaptive learning
+
+        # SCENARIO 2: Bull Market (low vol + positive trend)
+        elif not high_volatility and bull_market:
+            logger.info("Market regime: BULL - growth-oriented portfolio")
+            weights['markowitz'] = 0.35      # Maximize Sharpe
+            weights['black_litterman'] = 0.30  # Incorporate positive views
+            weights['rl_agent'] = 0.20       # Adaptive to momentum
+            weights['risk_parity'] = 0.10    # Some diversification
+            weights['cvar'] = 0.05           # Minimal tail risk focus
+
+        # SCENARIO 3: High Correlation (systemic risk)
+        elif high_correlation:
+            logger.info("Market regime: HIGH CORRELATION - diversification critical")
+            weights['risk_parity'] = 0.45    # Maximum diversification
+            weights['cvar'] = 0.25           # Tail risk protection
+            weights['black_litterman'] = 0.15  # Tactical positioning
+            weights['markowitz'] = 0.10
+            weights['rl_agent'] = 0.05
+
+        # SCENARIO 4: Moderate Volatility + Sideways Market
+        elif volatility > 0.15 and abs(trend) < 0.01:
+            logger.info("Market regime: SIDEWAYS - balanced approach")
+            weights['risk_parity'] = 0.30
+            weights['black_litterman'] = 0.25
+            weights['markowitz'] = 0.20
+            weights['cvar'] = 0.15
+            weights['rl_agent'] = 0.10
+
+        # SCENARIO 5: Default Balanced (uncertain conditions)
+        else:
+            logger.info("Market regime: BALANCED - ensemble approach")
+            weights['markowitz'] = 0.25
+            weights['black_litterman'] = 0.25
+            weights['risk_parity'] = 0.20
+            weights['cvar'] = 0.20
+            weights['rl_agent'] = 0.10
+
+        # Ensure weights sum to 1.0
+        total = sum(weights.values())
+        if total > 0:
+            weights = {k: v/total for k, v in weights.items()}
+
+        logger.info(f"Rule-based adaptive weights: {weights}")
+        return weights
 
     def predict(
         self,

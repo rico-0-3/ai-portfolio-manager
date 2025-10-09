@@ -85,7 +85,7 @@ class PortfolioOptimizer:
             return {returns.columns[0]: 1.0}
 
         logger.info(f"Running Markowitz optimization ({method})")
-        if ml_predictions and len(ml_predictions) > 0:
+        if ml_predictions is not None and len(ml_predictions) > 0:
             logger.info(f"  Using ML predictions (1m horizon) for {len(ml_predictions)} tickers")
         else:
             logger.info("  Using historical returns (no ML predictions)")
@@ -104,11 +104,15 @@ class PortfolioOptimizer:
                 raise ValueError(f"Insufficient clean data: {len(returns)} rows")
 
             # Calculate expected returns - ALWAYS prefer ML predictions over historical
-            if ml_predictions:
+            if ml_predictions is not None and len(ml_predictions) > 0:
                 # Use ML predictions (simple float format for 1m)
                 mu_dict = {}
                 for ticker in returns.columns:
                     pred = ml_predictions.get(ticker, 0)
+                    # CRITICAL: Check if prediction is NaN (should never happen if meta_model filters correctly)
+                    if pd.isna(pred):
+                        logger.error(f"ML prediction for {ticker} is NaN! This should be filtered in meta_model!")
+                        raise ValueError(f"NaN prediction for {ticker} - check meta_model filtering")
                     # ML prediction is already 1-month return, use directly
                     mu_dict[ticker] = pred
 
@@ -124,9 +128,10 @@ class PortfolioOptimizer:
                     tickers = returns.columns
                     return {ticker: 1.0/len(tickers) for ticker in tickers}
             else:
-                # Fallback to historical mean only if no ML predictions
-                mu = expected_returns.mean_historical_return(returns)
-                logger.info("Using historical mean for expected returns (no ML predictions available)")
+                # This should NEVER happen if meta_model.py filters correctly
+                logger.error("CRITICAL: No ML predictions provided to Markowitz!")
+                logger.error("Markowitz should ALWAYS receive ML predictions from meta_model")
+                raise ValueError("ML predictions required for Markowitz optimization")
 
             # Check for NaN in mu and remove problematic tickers
             if mu.isnull().any():
@@ -147,11 +152,20 @@ class PortfolioOptimizer:
                     raise ValueError("All tickers have NaN expected returns")
 
                 # Recalculate mu with remaining tickers
-                if ml_predictions:
+                if ml_predictions is not None and len(ml_predictions) > 0:
                     # Keep using ML predictions for remaining tickers
-                    mu = pd.Series({ticker: ml_predictions.get(ticker, 0)
-                                   for ticker in returns.columns})
-                    logger.info("Using ML predictions for remaining tickers")
+                    # CRITICAL: Filter out NaN predictions during retry
+                    mu_dict_clean = {}
+                    for ticker in returns.columns:
+                        pred = ml_predictions.get(ticker, 0)
+                        # Skip if prediction is NaN
+                        if pd.isna(pred):
+                            logger.warning(f"ML prediction for {ticker} is NaN in retry, using 0")
+                            mu_dict_clean[ticker] = 0.0
+                        else:
+                            mu_dict_clean[ticker] = pred
+                    mu = pd.Series(mu_dict_clean)
+                    logger.info("Using ML predictions for remaining tickers (NaN filtered)")
                 else:
                     mu = expected_returns.mean_historical_return(returns)
 
@@ -312,9 +326,10 @@ class PortfolioOptimizer:
 
         except Exception as e:
             logger.debug(f"Black-Litterman optimization failed: {e}")
-            # Fallback to Markowitz
-            logger.debug("Falling back to Markowitz optimization")
-            return self.markowitz_optimization(returns, method='max_sharpe')
+            # Fallback to equal weights (don't call Markowitz without ml_predictions!)
+            logger.debug("Black-Litterman failed, using equal weights")
+            tickers = returns.columns
+            return {ticker: 1.0/len(tickers) for ticker in tickers}
 
     def risk_parity_optimization(
         self,
@@ -455,7 +470,7 @@ class PortfolioOptimizer:
         # Target return constraint
         if target_return:
             # Use ML predictions if available, otherwise historical mean
-            if ml_predictions:
+            if ml_predictions is not None and len(ml_predictions) > 0:
                 mu_list = []
                 for ticker in returns.columns:
                     pred = ml_predictions.get(ticker, 0)
@@ -610,3 +625,210 @@ class PortfolioOptimizer:
         }
 
         return metrics
+
+    def rl_agent_optimization(
+        self,
+        returns: pd.DataFrame,
+        ml_predictions: Optional[Dict[str, float]] = None,
+        training_steps: int = 10000
+    ) -> Dict[str, float]:
+        """
+        Reinforcement Learning Agent (PPO) for portfolio optimization.
+
+        Uses Stable-Baselines3 PPO to learn optimal portfolio allocation.
+        State: returns, volatility, correlation, ML predictions
+        Action: portfolio weights (continuous)
+        Reward: Sharpe ratio
+
+        Args:
+            returns: DataFrame of asset returns
+            ml_predictions: Optional ML predictions for state augmentation
+            training_steps: Number of training steps (default 10000)
+
+        Returns:
+            Dictionary of ticker to weight
+        """
+        logger.info(f"Running RL Agent optimization (PPO, {training_steps} steps)")
+
+        try:
+            # Check if stable-baselines3 is available
+            try:
+                from stable_baselines3 import PPO
+                from stable_baselines3.common.vec_env import DummyVecEnv
+                import gymnasium as gym
+                from gymnasium import spaces
+            except ImportError:
+                logger.warning("stable-baselines3 not available. Install: pip install stable-baselines3 gymnasium")
+                logger.warning("Falling back to Risk Parity")
+                return self.risk_parity_optimization(returns, ml_predictions)
+
+            # Handle single asset case
+            if len(returns.columns) == 1:
+                logger.info("Single asset detected, returning 100% allocation")
+                return {returns.columns[0]: 1.0}
+
+            # ========== CUSTOM PORTFOLIO ENVIRONMENT ==========
+            class PortfolioEnv(gym.Env):
+                """
+                Custom Gymnasium environment for portfolio optimization.
+
+                State: [returns_mean, volatility, correlation_matrix_flattened, ML_predictions]
+                Action: portfolio weights (continuous, sum to 1)
+                Reward: Sharpe ratio of the portfolio
+                """
+
+                def __init__(self, returns_df, ml_preds=None):
+                    super().__init__()
+
+                    self.returns_df = returns_df
+                    self.ml_preds = ml_preds or {}
+                    self.tickers = returns_df.columns.tolist()
+                    self.n_assets = len(self.tickers)
+
+                    # Calculate statistics
+                    self.returns_mean = returns_df.mean().values
+                    self.returns_std = returns_df.std().values
+                    self.corr_matrix = returns_df.corr().values
+
+                    # State space:
+                    # - n_assets: mean returns
+                    # - n_assets: volatilities
+                    # - n_assets*(n_assets-1)/2: unique correlation pairs
+                    # - n_assets: ML predictions (if available)
+                    n_corr_features = int(self.n_assets * (self.n_assets - 1) / 2)
+                    state_dim = self.n_assets * 2 + n_corr_features
+                    if ml_preds is not None and len(ml_preds) > 0:
+                        state_dim += self.n_assets
+
+                    self.observation_space = spaces.Box(
+                        low=-np.inf,
+                        high=np.inf,
+                        shape=(state_dim,),
+                        dtype=np.float32
+                    )
+
+                    # Action space: portfolio weights (continuous, 0 to 1)
+                    self.action_space = spaces.Box(
+                        low=0.0,
+                        high=1.0,
+                        shape=(self.n_assets,),
+                        dtype=np.float32
+                    )
+
+                    self.current_step = 0
+                    self.max_steps = 1000
+
+                def reset(self, seed=None, options=None):
+                    super().reset(seed=seed)
+                    self.current_step = 0
+                    return self._get_state(), {}
+
+                def _get_state(self):
+                    """Get current state representation."""
+                    state = []
+
+                    # Mean returns
+                    state.extend(self.returns_mean)
+
+                    # Volatilities
+                    state.extend(self.returns_std)
+
+                    # Correlation matrix (upper triangle, no diagonal)
+                    for i in range(self.n_assets):
+                        for j in range(i+1, self.n_assets):
+                            state.append(self.corr_matrix[i, j])
+
+                    # ML predictions (if available)
+                    if self.ml_preds is not None and len(self.ml_preds) > 0:
+                        for ticker in self.tickers:
+                            state.append(self.ml_preds.get(ticker, 0.0))
+
+                    return np.array(state, dtype=np.float32)
+
+                def step(self, action):
+                    """
+                    Execute action (portfolio weights) and return reward.
+
+                    Reward = Sharpe ratio of the portfolio
+                    """
+                    self.current_step += 1
+
+                    # Normalize weights to sum to 1
+                    weights = action / (action.sum() + 1e-8)
+
+                    # Calculate portfolio metrics
+                    portfolio_return = np.dot(weights, self.returns_mean) * 252  # Annualized
+                    portfolio_variance = weights @ self.returns_df.cov().values @ weights
+                    portfolio_vol = np.sqrt(portfolio_variance * 252)  # Annualized
+
+                    # Reward: Sharpe ratio
+                    risk_free_rate = 0.02
+                    sharpe = (portfolio_return - risk_free_rate) / (portfolio_vol + 1e-8)
+
+                    # Add penalty for extreme concentration (encourage diversification)
+                    concentration_penalty = -np.sum(weights ** 2)  # Negative Herfindahl index
+
+                    # Combined reward
+                    reward = sharpe + 0.1 * concentration_penalty
+
+                    # Episode termination
+                    done = self.current_step >= self.max_steps
+                    truncated = False
+
+                    return self._get_state(), reward, done, truncated, {}
+
+                def render(self):
+                    pass
+
+            # ========== TRAIN RL AGENT ==========
+
+            # Create environment
+            env = DummyVecEnv([lambda: PortfolioEnv(returns, ml_predictions)])
+
+            # Create PPO agent
+            model = PPO(
+                "MlpPolicy",
+                env,
+                learning_rate=3e-4,
+                n_steps=2048,
+                batch_size=64,
+                n_epochs=10,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.2,
+                ent_coef=0.01,  # Encourage exploration
+                verbose=0,
+                seed=42
+            )
+
+            # Train
+            logger.info(f"  Training PPO agent for {training_steps} steps...")
+            model.learn(total_timesteps=training_steps, progress_bar=False)
+
+            # Get optimal weights
+            obs = env.reset()
+            action, _ = model.predict(obs, deterministic=True)
+
+            # Normalize weights
+            weights_array = action[0] / (action[0].sum() + 1e-8)
+
+            # Convert to dictionary
+            weights = dict(zip(returns.columns, weights_array))
+
+            # Calculate resulting Sharpe ratio
+            portfolio_return = np.dot(weights_array, returns.mean().values) * 252
+            portfolio_vol = np.sqrt(weights_array @ returns.cov().values @ weights_array * 252)
+            sharpe = (portfolio_return - self.risk_free_rate) / portfolio_vol
+
+            logger.info(f"  RL Agent Sharpe: {sharpe:.4f}")
+            logger.info(f"  Weights: {weights}")
+
+            return weights
+
+        except Exception as e:
+            logger.warning(f"RL Agent optimization failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # Fallback to Risk Parity
+            logger.warning("Falling back to Risk Parity")
+            return self.risk_parity_optimization(returns, ml_predictions)

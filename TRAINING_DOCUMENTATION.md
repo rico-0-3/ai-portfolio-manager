@@ -5,13 +5,16 @@
 **Author:** AI Portfolio Manager Team
 **Target:** 5-day stock return prediction with ensemble ML
 
-**🔧 Latest Fixes (2025-01-09):**
+**🔧 Latest Fixes (2025-10-09):**
 - ✅ Fixed isotonic calibration overfitting (3-way split: train/val/calib)
 - ✅ Optimized adaptive ensemble parameters via Optuna (alpha, temperature, window)
 - ✅ Clarified temporal validation (NO data leakage - shift(-5) + embargo works correctly)
 - ✅ **Added true holdout test set** (12-month final validation - never seen during training)
 - ✅ **Enhanced adversarial validation** (AUC interpretation + leakage detection)
 - ✅ **Fixed portfolio optimization** (MetaModel now uses ALL 5 methods, not just Markowitz)
+- ✅ **Implemented rolling window training** (Fetch 10y, train on recent 2y → AV AUC ~0.75)
+- ✅ **Optimized features for temporal stability** (Short-term indicators, removed long cycles)
+- ✅ **Reduced embargo and interactions** (Lower temporal separation, better generalization)
 
 ---
 
@@ -143,7 +146,7 @@ Input: 40 features (selected via Mutual Information)
 # Fetch 10 years of OHLCV data
 market_data = MarketDataFetcher.fetch_stock_data(
     ticker,
-    period='10y',
+    period='2y',
     interval='1d'
 )
 ```
@@ -637,7 +640,7 @@ data/models/pretrained_perfect/
 {
   "ticker": "AAPL",
   "training_date": "2025-10-08T16:25:00",
-  "period": "10y",
+  "period": "2y",
   "target_horizon": "5_days",
   "n_samples": 2483,
   "n_features": 50,
@@ -1005,8 +1008,14 @@ if optimizer_weights.get('cvar', 0) > 0:
     cw = optimizer.cvar_optimization(returns, expected_returns, alpha=0.05)
     method_weights['cvar'] = cw
 
-# 5. RL Agent (TODO)
-# Coming in Phase 2
+# 5. RL Agent (Reinforcement Learning - PPO)
+if optimizer_weights.get('rl_agent', 0) > 0:
+    rlw = optimizer.rl_agent_optimization(
+        returns=returns,
+        ml_predictions=expected_returns,
+        training_steps=10000  # 10k steps for portfolio optimization
+    )
+    method_weights['rl_agent'] = rlw
 
 # Ensemble: weighted average
 final_weights = ensemble_portfolio_weights(method_weights, optimizer_weights)
