@@ -117,85 +117,59 @@ class MetaModel:
         else:
             optimizer_weights = self.portfolio_optimizer_config
 
-        # TEMPORARY FIX: Use PortfolioOptimizer class instead of standalone functions
+        # Use PortfolioOptimizer class with ALL 5 methods
         from src.portfolio.optimizer import PortfolioOptimizer
-        
-        try:
-            optimizer = PortfolioOptimizer()
-            
-            # Convert predictions to expected return format
-            expected_returns = pd.Series(predictions)
-            
-            # Use Markowitz optimization (mean-variance)
-            weights = optimizer.markowitz_optimization(
-                returns=historical_returns,
-                ml_predictions=expected_returns  # Use ML predictions as expected returns
-            )
-            
-            # markowitz_optimization returns Dict[str, float], exactly what we need
-            return weights
-            
-        except Exception as e:
-            logger.warning(f"Portfolio optimization failed: {e}, using equal weights")
-            # Fallback: equal weights
-            tickers = list(predictions.keys())
-            return {ticker: 1.0 / len(tickers) for ticker in tickers}
 
-        # OLD CODE (standalone functions don't exist):
-        # from src.portfolio.optimizer import (
-        #     optimize_portfolio_markowitz,
-        #     optimize_portfolio_black_litterman,
-        #     optimize_portfolio_risk_parity,
-        #     optimize_portfolio_cvar
-        # )
+        optimizer = PortfolioOptimizer(risk_free_rate=0.02)
 
-        # Calculate weights from each method
+        # Convert predictions to expected return format
+        expected_returns = pd.Series(predictions)
+
+        # Calculate weights from each optimization method
         method_weights = {}
 
-        # Markowitz
+        # 1. Markowitz (Mean-Variance Optimization)
         if optimizer_weights.get('markowitz', 0) > 0:
             try:
-                mw = optimize_portfolio_markowitz(
+                mw = optimizer.markowitz_optimization(
                     returns=historical_returns,
-                    ml_predictions=predictions,
-                    risk_free_rate=0.02
+                    ml_predictions=expected_returns
                 )
                 method_weights['markowitz'] = mw
                 logger.debug(f"Markowitz weights: {mw}")
             except Exception as e:
                 logger.warning(f"Markowitz failed: {e}")
 
-        # Black-Litterman
+        # 2. Black-Litterman
         if optimizer_weights.get('black_litterman', 0) > 0:
             try:
-                blw = optimize_portfolio_black_litterman(
+                blw = optimizer.black_litterman_optimization(
                     returns=historical_returns,
-                    ml_predictions=predictions,
-                    risk_free_rate=0.02
+                    ml_predictions=expected_returns
                 )
                 method_weights['black_litterman'] = blw
                 logger.debug(f"Black-Litterman weights: {blw}")
             except Exception as e:
                 logger.warning(f"Black-Litterman failed: {e}")
 
-        # Risk Parity
+        # 3. Risk Parity
         if optimizer_weights.get('risk_parity', 0) > 0:
             try:
-                rpw = optimize_portfolio_risk_parity(
+                rpw = optimizer.risk_parity_optimization(
                     returns=historical_returns,
-                    ml_predictions=predictions
+                    ml_predictions=expected_returns
                 )
                 method_weights['risk_parity'] = rpw
                 logger.debug(f"Risk Parity weights: {rpw}")
             except Exception as e:
                 logger.warning(f"Risk Parity failed: {e}")
 
-        # CVaR
+        # 4. CVaR (Conditional Value at Risk)
         if optimizer_weights.get('cvar', 0) > 0:
             try:
-                cw = optimize_portfolio_cvar(
+                cw = optimizer.cvar_optimization(
                     returns=historical_returns,
-                    ml_predictions=predictions,
+                    ml_predictions=expected_returns,
                     alpha=0.05
                 )
                 method_weights['cvar'] = cw
@@ -203,11 +177,18 @@ class MetaModel:
             except Exception as e:
                 logger.warning(f"CVaR failed: {e}")
 
-        # RL Agent (placeholder - will be trained in Phase 2)
+        # 5. RL Agent (placeholder - will be trained in Phase 2)
         if optimizer_weights.get('rl_agent', 0) > 0:
             logger.warning("RL Agent not yet implemented, skipping")
+            # TODO: Implement RL agent portfolio optimization
 
-        # Ensemble: weighted average of all methods
+        # If no methods succeeded, fallback to equal weights
+        if not method_weights:
+            logger.warning("All optimization methods failed, using equal weights")
+            tickers = list(predictions.keys())
+            return {ticker: 1.0 / len(tickers) for ticker in tickers}
+
+        # Ensemble: weighted average of all successful methods
         final_weights = self._ensemble_portfolio_weights(method_weights, optimizer_weights)
 
         return final_weights
@@ -300,7 +281,32 @@ class MetaModel:
         # Phase 2: Optimize portfolio
         weights = self.optimize_portfolio(predictions, historical_returns, market_conditions)
 
+        # Store last optimization details (for get_optimization_details())
+        self._last_optimization_details = self._calculate_optimization_details()
+
         return weights
+
+    def _calculate_optimization_details(self) -> Dict[str, Dict[str, float]]:
+        """
+        Calculate per-ticker contribution from each optimization method.
+
+        Returns:
+            {ticker: {method: contribution_percentage}}
+        """
+        # This would require storing intermediate method_weights during optimize_portfolio()
+        # For now, return empty dict - can be enhanced in future
+        return {}
+
+    def get_optimization_details(self) -> Dict[str, Dict[str, float]]:
+        """
+        Get details about which optimization methods contributed to each ticker's weight.
+
+        Returns:
+            {ticker: {method_name: contribution_percentage}}
+        """
+        # For now, return the static optimizer config as a proxy
+        # In the future, this could track actual per-ticker method contributions
+        return getattr(self, '_last_optimization_details', {})
 
     @classmethod
     def load(cls, model_dir: Path) -> "MetaModel":

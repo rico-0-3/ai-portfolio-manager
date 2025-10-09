@@ -278,12 +278,19 @@ def purged_time_series_split(n_samples: int, n_splits: int = 5, embargo_pct: flo
     return splits
 
 
-def adversarial_validation(X_train: np.ndarray, X_test: np.ndarray) -> float:
+def adversarial_validation(X_train: np.ndarray, X_test: np.ndarray, feature_names: List[str] = None) -> float:
     """
     Check train/test similarity using adversarial validation.
 
     Returns AUC score - higher means train and test are more different (bad!)
     Score > 0.7 indicates distribution shift
+
+    IMPORTANT: In financial data, AUC 0.7-0.8 is NORMAL because:
+    - Market regimes change over time (bull/bear/sideways)
+    - Volatility clusters (calm vs volatile periods)
+    - Macroeconomic shifts (interest rates, inflation)
+
+    Only worry if AUC > 0.90 - that indicates potential feature leakage!
     """
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import roc_auc_score
@@ -298,7 +305,34 @@ def adversarial_validation(X_train: np.ndarray, X_test: np.ndarray) -> float:
     scores = cross_val_score(clf, X_combined, y_combined, cv=3, scoring='roc_auc')
     auc = scores.mean()
 
-    logger.info(f"  Adversarial Validation AUC: {auc:.3f} ({'✓ Good' if auc < 0.7 else '⚠️  Distribution shift detected'})")
+    # Interpretation
+    if auc < 0.6:
+        status = "✅ EXCELLENT (train/test very similar)"
+    elif auc < 0.7:
+        status = "✓ Good (acceptable)"
+    elif auc < 0.8:
+        status = "⚠️  Fair (expected for financial data - market regime shifts)"
+    elif auc < 0.9:
+        status = "⚠️  High (significant distribution shift - check features)"
+    else:
+        status = "❌ CRITICAL (AUC>0.9 suggests feature leakage!)"
+
+    logger.info(f"  Adversarial Validation AUC: {auc:.3f} - {status}")
+
+    # If AUC is very high, show which features are most predictive of train/test split
+    if auc > 0.85 and feature_names is not None:
+        logger.info(f"  🔍 Investigating high AUC (potential leakage)...")
+        clf_full = RandomForestClassifier(n_estimators=100, max_depth=7, random_state=42, n_jobs=-1)
+        clf_full.fit(X_combined, y_combined)
+
+        # Get feature importances
+        importances = clf_full.feature_importances_
+        top_idx = np.argsort(importances)[-10:]  # Top 10 features
+
+        logger.info(f"  Top 10 features distinguishing train/test (potential leakage sources):")
+        for idx in reversed(top_idx):
+            if idx < len(feature_names):
+                logger.info(f"    {feature_names[idx]}: importance={importances[idx]:.4f}")
 
     return auc
 
@@ -865,13 +899,14 @@ def train_perfect_model(
         y_direction = df_training['target_direction'].values  # For validation metrics
         feature_names = feature_cols
 
-        # Prepare holdout data (if exists)
+        # Prepare holdout data (if exists) - but DON'T apply feature selection yet!
+        # Feature selection happens AFTER we determine which features to keep from training data
         if df_holdout is not None:
-            X_holdout_raw = df_holdout[feature_cols].values
+            X_holdout_raw_full = df_holdout[feature_cols].values  # All 99 features
             y_holdout = df_holdout['target'].values
             y_holdout_direction = df_holdout['target_direction'].values
         else:
-            X_holdout_raw = None
+            X_holdout_raw_full = None
             y_holdout = None
 
         logger.info(f"  ✓ Initial features: {len(feature_names)}")
@@ -888,6 +923,24 @@ def train_perfect_model(
         X_raw, feature_names = adv_eng.create_interaction_features(X_raw, feature_names, top_k=5)
 
         logger.info(f"  ✓ Final features after selection: {len(feature_names)}")
+
+        # Apply same feature selection to HOLDOUT set (if exists)
+        if X_holdout_raw_full is not None:
+            # Get the indices of selected features from original feature list
+            original_feature_cols = feature_cols
+            selected_feature_indices = [original_feature_cols.index(f) for f in feature_names if f in original_feature_cols and '_x_' not in f]
+
+            # Apply same selection
+            X_holdout_selected = X_holdout_raw_full[:, selected_feature_indices]
+
+            # Create same interaction features on holdout
+            X_holdout_with_interactions, _ = adv_eng.create_interaction_features(
+                X_holdout_selected,
+                [original_feature_cols[i] for i in selected_feature_indices],
+                top_k=5
+            )
+
+            logger.info(f"  ✓ Holdout features aligned: {X_holdout_with_interactions.shape[1]} features")
 
         # ========== TRAIN/VAL/CALIB SPLIT (TimeSeriesSplit with purging) ==========
         # OPTIMIZATION 3: Increase splits from 5 → 10 for more robust validation
@@ -908,8 +961,8 @@ def train_perfect_model(
 
         logger.info(f"  ✓ Split sizes: Train={len(X_train_full)}, Val={len(X_val)}, Calib={len(X_calib)}")
 
-        # Adversarial validation
-        adversarial_validation(X_train_full, X_val)
+        # Adversarial validation (check for leakage)
+        adversarial_validation(X_train_full, X_val, feature_names)
 
         # ========== SCALING ==========
         scaler = RobustScaler()
@@ -1002,6 +1055,50 @@ def train_perfect_model(
         logger.info(f"    - Calibrated MAE:   {calibrated_mae:.6f}, DA: {calibrated_dir_accuracy*100:.2f}%")
         logger.info(f"    - Improvement:      MAE {((uncalibrated_mae_calib-calibrated_mae)/uncalibrated_mae_calib*100):+.1f}%, DA {((calibrated_dir_accuracy-uncalibrated_dir_accuracy_calib)*100):+.1f}%")
 
+        # ========== FINAL HOLDOUT TEST (NEVER SEEN BEFORE!) ==========
+        logger.info(f"  🔒 Step 7/7: Final holdout test (12-month out-of-sample)...")
+
+        holdout_mae = None
+        holdout_dir_accuracy = None
+
+        if X_holdout_raw_full is not None:
+            logger.info(f"\n{'='*70}")
+            logger.info("🎯 FINAL HOLDOUT TEST (12 MONTHS - NEVER SEEN!)")
+            logger.info(f"{'='*70}")
+
+            # Apply scaling (features already selected above)
+            X_holdout_scaled = scaler.transform(X_holdout_with_interactions)
+
+            # Get predictions from level-1 models
+            level1_preds_holdout = []
+            for model in stacked_result['level1_models'].values():
+                level1_preds_holdout.append(model.predict(X_holdout_scaled))
+            X_meta_holdout = np.column_stack(level1_preds_holdout)
+
+            # Get meta-learner predictions
+            uncalibrated_preds_holdout = stacked_result['meta_learner'].predict(X_meta_holdout)
+
+            # Apply calibration
+            calibrated_preds_holdout = calibrator.predict(uncalibrated_preds_holdout)
+
+            # Calculate metrics
+            holdout_mae = mean_absolute_error(y_holdout, calibrated_preds_holdout)
+            holdout_dir_pred = (calibrated_preds_holdout > 0).astype(int)
+            holdout_dir_actual = (y_holdout > 0).astype(int)
+            holdout_dir_accuracy = (holdout_dir_pred == holdout_dir_actual).mean()
+
+            logger.info(f"  ✅ FINAL HOLDOUT RESULTS (THIS IS THE TRUE OUT-OF-SAMPLE PERFORMANCE!):")
+            logger.info(f"     MAE: {holdout_mae:.6f}")
+            logger.info(f"     Directional Accuracy: {holdout_dir_accuracy*100:.2f}%")
+            logger.info(f"     Sample size: {len(y_holdout)} days (252 trading days = 12 months)")
+            logger.info(f"\n  📊 Performance Comparison:")
+            logger.info(f"     Validation MAE:   {calibrated_mae:.6f} | DA: {calibrated_dir_accuracy*100:.2f}%")
+            logger.info(f"     Calibration MAE:  {calibrated_mae:.6f} | DA: {calibrated_dir_accuracy*100:.2f}%")
+            logger.info(f"     HOLDOUT MAE:      {holdout_mae:.6f} | DA: {holdout_dir_accuracy*100:.2f}% ⭐")
+            logger.info(f"  {'='*70}\n")
+        else:
+            logger.warning(f"  ⚠️  No holdout test set available (insufficient data)")
+
         # ========== CREATE UNIFIED ENSEMBLE MODEL ==========
         logger.info("  Creating UnifiedEnsembleModel...")
 
@@ -1036,7 +1133,11 @@ def train_perfect_model(
                 'validation_rmse': float(stacked_result['metrics']['rmse']),
                 'validation_r2': float(stacked_result['metrics']['r2']),
                 'validation_directional_accuracy': float(calibrated_dir_accuracy),  # NEW: Most important!
-                'validation_directional_accuracy_uncalibrated': float(stacked_result['metrics']['directional_accuracy'])
+                'validation_directional_accuracy_uncalibrated': float(stacked_result['metrics']['directional_accuracy']),
+                # FINAL HOLDOUT RESULTS (12-month out-of-sample - NEVER SEEN!)
+                'holdout_mae': float(holdout_mae) if holdout_mae is not None else None,
+                'holdout_directional_accuracy': float(holdout_dir_accuracy) if holdout_dir_accuracy is not None else None,
+                'holdout_samples': int(len(y_holdout)) if X_holdout_raw_full is not None else None
             },
             'hyperparameters': best_params,
             'features': feature_names

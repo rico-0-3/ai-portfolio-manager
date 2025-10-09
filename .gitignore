@@ -76,3 +76,5 @@ htmlcov/
 
 # OS
 Thumbs.db
+
+catboost_info/
