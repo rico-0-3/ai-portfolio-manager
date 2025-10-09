@@ -24,8 +24,9 @@ PARALLEL="1"
 PERIOD="10y"          # Fetch 10 years for good local cache
 ROLLING_WINDOW="true" # Enable rolling window by default
 WINDOW_YEARS="2"      # Use only most recent 2 years for training → AV AUC ~0.70
-HOLDOUT_MONTHS="3"    # 3 months holdout for 2y training (12 cycles of 5-day predictions)
+HOLDOUT_MONTHS="3"    # 0 months holdout for 2y training (12 cycles of 5-day predictions)
 OUTPUT="data/models/pretrained_perfect"
+DISABLE_HOLDOUT="false"
 
 # Parse arguments
 while [ $# -gt 0 ]; do
@@ -63,6 +64,10 @@ while [ $# -gt 0 ]; do
             HOLDOUT_MONTHS="$2"
             shift 2
             ;;
+        --disable-holdout)
+            DISABLE_HOLDOUT="true"
+            shift
+            ;;
         --output)
             OUTPUT="$2"
             shift 2
@@ -79,6 +84,7 @@ while [ $# -gt 0 ]; do
             echo "  --no-rolling-window         Disable rolling window (uses all data)"
             echo "  --window-years N            Rolling window size in years (default: 1)"
             echo "  --holdout-months N          Holdout period in months (default: 3)"
+            echo "  --disable-holdout           Train on entire dataset (no final holdout)"
             echo "  --output DIR                Output directory (default: data/models/pretrained_perfect)"
             echo "  --help, -h                  Show this help message"
             echo ""
@@ -95,6 +101,7 @@ while [ $# -gt 0 ]; do
             echo "  $0 --parallel 4 --no-optimize        # Fast training, 4 parallel"
             echo "  $0 --window-years 2 --holdout-months 6   # 2y training, 6mo holdout"
             echo "  $0 --window-years 5 --holdout-months 12  # 5y training, 12mo holdout"
+            echo "  $0 --disable-holdout                 # Train on full dataset (no holdout)"
             exit 0
             ;;
         *)
@@ -141,8 +148,12 @@ if [ "$ROLLING_WINDOW" = "true" ]; then
     CMD="$CMD --rolling-window --window-years $WINDOW_YEARS"
 fi
 
-# Add holdout parameter
-CMD="$CMD --holdout-months $HOLDOUT_MONTHS"
+# Add holdout parameter(s)
+if [ "$DISABLE_HOLDOUT" = "true" ]; then
+    CMD="$CMD --disable-holdout"
+else
+    CMD="$CMD --holdout-months $HOLDOUT_MONTHS"
+fi
 
 # Print summary
 echo ""
@@ -163,7 +174,11 @@ if [ "$ROLLING_WINDOW" = "true" ]; then
 else
     echo "Rolling Window: Disabled (use all $PERIOD data)"
 fi
-echo "Holdout: $HOLDOUT_MONTHS months (~$((HOLDOUT_MONTHS * 21)) trading days)"
+if [ "$DISABLE_HOLDOUT" = "true" ]; then
+    echo "Holdout: DISABLED (train + validate on full dataset)"
+else
+    echo "Holdout: $HOLDOUT_MONTHS months (~$((HOLDOUT_MONTHS * 21)) trading days)"
+fi
 if [ "$OPTIMIZE" = "true" ]; then
     echo "Optimization: Enabled (100 Optuna trials)"
 else

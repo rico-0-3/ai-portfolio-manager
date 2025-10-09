@@ -163,14 +163,46 @@ class MetaModel:
             tickers = list(expected_returns_dict.keys())
             return {ticker: 1.0 / len(tickers) for ticker in tickers}
 
-        # Filter historical_returns to match clean predictions
-        valid_tickers = list(clean_predictions.keys())
-        historical_returns = historical_returns[valid_tickers]
+        # Filter historical_returns to match clean predictions and sanitize
         expected_returns_dict = clean_predictions
+        valid_tickers = list(expected_returns_dict.keys())
+        historical_returns = historical_returns[valid_tickers]
+
+        # Replace inf with NaN before cleaning
+        historical_returns = historical_returns.replace([np.inf, -np.inf], np.nan)
+
+        # Drop tickers whose return history still has NaN values
+        nan_cols = [col for col in historical_returns.columns if historical_returns[col].isna().any()]
+        if nan_cols:
+            logger.warning(
+                "Removing %d ticker(s) with NaN returns before optimization: %s",
+                len(nan_cols),
+                nan_cols,
+            )
+            historical_returns = historical_returns.drop(columns=nan_cols)
+            for col in nan_cols:
+                expected_returns_dict.pop(col, None)
+
+        # If all tickers were dropped due to NaNs, fallback to equal weights
+        if not expected_returns_dict:
+            logger.error("All tickers removed due to NaN returns. Using equal weights fallback.")
+            tickers = list(clean_predictions.keys())
+            if not tickers:
+                tickers = list(predictions.keys())
+            return {ticker: 1.0 / len(tickers) for ticker in tickers} if tickers else {}
+
+        # Drop any remaining NaN rows to ensure clean covariance estimation
+        if historical_returns.isnull().any().any():
+            logger.warning("Dropping %d rows with NaN returns before optimization", historical_returns.isnull().any(axis=1).sum())
+            historical_returns = historical_returns.dropna()
 
         # FINAL VALIDATION: Double-check no NaN in clean predictions
         assert all(not pd.isna(v) for v in expected_returns_dict.values()), \
             f"CRITICAL: NaN found in clean_predictions! {expected_returns_dict}"
+
+        # Ensure historical_returns still has matching tickers after cleaning
+        valid_tickers = list(expected_returns_dict.keys())
+        historical_returns = historical_returns[valid_tickers]
 
         logger.info(f"Optimizing portfolio with {len(expected_returns_dict)} valid predictions")
         logger.debug(f"Final predictions passed to optimizer: {expected_returns_dict}")
