@@ -48,13 +48,11 @@ class PortfolioOrchestrator:
             log_file=log_config.get('log_file', 'logs/orchestrator.log')
         )
 
-        self.logger.info("Initializing Market Data Fetcher...")
         # Initialize components
         self.market_fetcher = MarketDataFetcher(
             cache_dir=self.config.get('paths.data_raw', 'data/raw')
         )
 
-        self.logger.info("Initializing Sentiment Data Fetcher...")
         self.sentiment_fetcher = SentimentDataFetcher(
             news_api_key=self.config.get('data.news_api.api_key')
         )
@@ -62,28 +60,21 @@ class PortfolioOrchestrator:
         # Initialize additional data sources
         fmp_enabled = self.config.get('data.fmp.enabled', False)
         fmp_key = self.config.get('data.fmp.api_key')
-        self.logger.info(f"Initializing FMP Data Fetcher... (Enabled: {fmp_enabled})")
         self.fmp_fetcher = FMPDataFetcher(api_key=fmp_key) if fmp_enabled and fmp_key else None
 
         finnhub_enabled = self.config.get('data.finnhub.enabled', False)
         finnhub_key = self.config.get('data.finnhub.api_key')
-        self.logger.info(f"Initializing Finnhub Data Fetcher... (Enabled: {finnhub_enabled})")
         self.finnhub_fetcher = FinnhubDataFetcher(api_key=finnhub_key) if finnhub_enabled and finnhub_key else None
 
-        self.logger.info("Initializing Technical Indicators...")
         self.tech_indicators = TechnicalIndicators()
 
-        self.logger.info("Initializing Sentiment Analyzer...")
         self.sentiment_analyzer = HybridSentimentAnalyzer()
 
-        self.logger.info("Initializing Feature Engineer...")
         self.feature_engineer = FeatureEngineer()
 
-        self.logger.info("Initializing Portfolio Optimizer...")
         self.optimizer = PortfolioOptimizer(
             risk_free_rate=self.config.get('optimization.mean_variance.risk_free_rate', 0.02)
         )
-        self.logger.info("Initializing Risk Manager...")
         self.risk_manager = RiskManager(
             max_position_size=self.config.get('portfolio.max_single_position', 0.20),
             max_drawdown=self.config.get('risk.max_drawdown', 0.25)
@@ -93,20 +84,17 @@ class PortfolioOrchestrator:
         use_dynamic_weights = self.config.get('optimization.dynamic_weights.enabled', True)
         lookback_period = self.config.get('optimization.dynamic_weights.lookback_period', 60)
 
-        self.logger.info(f"Initializing Dynamic Weight Calibrator... (Lookback Period: {lookback_period})")
         self.dynamic_calibrator = DynamicWeightCalibrator(lookback_period=lookback_period) if use_dynamic_weights else None
 
         # Reality check system (NEW!)
         use_reality_check = self.config.get('optimization.reality_check.enabled', True)
         
-        self.logger.info(f"Initializing Reality Check System... (Enabled: {use_reality_check})")
         self.reality_check = RealityCheck(
             degradation_factor=self.config.get('optimization.reality_check.degradation_factor', 0.7),
             min_transaction_cost=self.config.get('portfolio.transaction_cost', 0.001),
             slippage_factor=self.config.get('optimization.reality_check.slippage_factor', 0.0005)
         ) if use_reality_check else None
 
-        self.logger.info(f"PortfolioOrchestrator initialized (FMP: {fmp_enabled}, Finnhub: {finnhub_enabled}, DynamicWeights: {use_dynamic_weights}, RealityCheck: {use_reality_check})")
 
     def run_full_pipeline(
         self,
@@ -132,14 +120,10 @@ class PortfolioOrchestrator:
         Returns:
             Dict with results including weights, metrics, and allocations
         """
-        self.logger.info("="*80)
-        self.logger.info("METAMODEL PIPELINE")
-        self.logger.info(f"Tickers: {tickers}")
-        self.logger.info(f"Period: {period}")
-        self.logger.info("="*80)
+
 
         # Step 1: Fetch market data
-        self.logger.info("\n[1/3] Fetching market data...")
+        self.logger.info("  [1/3] Fetching market data...")
         market_data = self.market_fetcher.fetch_stock_data(
             tickers,
             period=period,
@@ -148,13 +132,13 @@ class PortfolioOrchestrator:
         self.logger.info(f"✓ Fetched data for {len(market_data)} tickers")
 
         # Step 2: Feature engineering (base features only)
-        self.logger.info("\n[2/3] Engineering features...")
+        self.logger.info("  [2/3] Engineering features...")
         fundamental_data, analyst_data = self._enrich_data(tickers)
         processed_data = self._engineer_features(market_data, fundamental_data, analyst_data)
         self.logger.info(f"✓ Base features ready")
 
         # Step 3: Load MetaModel and predict
-        self.logger.info("\n[3/3] Loading MetaModel...")
+        self.logger.info("  [3/3] Loading MetaModel...")
         meta_model_dir = Path("data/models/pretrained_perfect")
 
         if not meta_model_dir.exists() or not (meta_model_dir / "meta_model_metadata.json").exists():
@@ -313,9 +297,9 @@ class PortfolioOrchestrator:
             'budget': budget
         }
 
-        self.logger.info("\n" + "="*80)
+        self.logger.info("="*50)
         self.logger.info("PIPELINE COMPLETED SUCCESSFULLY")
-        self.logger.info("="*80)
+        self.logger.info("="*50)
 
         return results
 
@@ -458,7 +442,7 @@ class PortfolioOrchestrator:
                 features_msg = f"{ticker}: {len(df)} rows, {len(df.columns)} features"
                 if fund_count > 0 or analyst_count > 0:
                     features_msg += f" (technical: {len(df.columns) - fund_count - analyst_count}, fundamental: {fund_count}, analyst: {analyst_count})"
-                self.logger.info(features_msg)
+                # self.logger.info(features_msg)
 
             except Exception as e:
                 self.logger.error(f"Feature engineering error for {ticker}: {e}")
@@ -506,8 +490,6 @@ class PortfolioOrchestrator:
             ml_pred = predictions.get(ticker, 0)
 
             print(f"\n📊 {ticker}")
-            print(f"  Allocation:      ${value:>10,.2f} ({weight_pct:>5.1f}% of portfolio)")
-            print(f"  Shares:          {shares:>4d} @ ${price:.2f}")
             print(f"  ML Prediction:   {ml_pred*100:>+6.2f}% (5-day return)")
 
             # Show which optimization methods contributed most
@@ -533,22 +515,3 @@ class PortfolioOrchestrator:
         weekly_return = metrics.get('monthly_return', 0)  # This is actually 5-day return from new model
 
         print(f"  5 Days:     {weekly_return*100:+6.2f}%  (ML model - 5d horizon)")
-
-        # Extrapolate to 1 month (conservative: 5 days × 4 trading weeks)
-        monthly_return_extrapolated = weekly_return * 4
-        print(f"  1 Month (est): {monthly_return_extrapolated*100:+6.2f}%  (extrapolated from 5d)")
-
-        # Estimated portfolio value (5 days projection)
-        print("\nESTIMATED PORTFOLIO VALUE (5 DAYS / 1 WEEK):")
-        print("-"*80)
-        current_value = total_invested
-        week_val = current_value * (1 + weekly_return)
-        month_val = current_value * (1 + monthly_return_extrapolated)
-
-        print(f"  Current:      ${current_value:>12,.2f}")
-        print(f"  5 Days:       ${week_val:>12,.2f}  ({(week_val-current_value):+,.2f})  (ML model)")
-        print(f"  1 Month (est):${month_val:>12,.2f}  ({(month_val-current_value):+,.2f})  (extrapolated)")
-
-        print("\n" + "="*80)
-        print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*80 + "\n")

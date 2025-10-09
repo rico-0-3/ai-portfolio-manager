@@ -123,69 +123,37 @@ logger = logging.getLogger(__name__)
 # S&P 500 Top 50 by market cap (2025) + Speculative/Trading Stocks
 SP500_TOP50 = [
     # === MEGA CAPS (Safe Foundation) ===
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
-    'V', 'XOM', 'WMT', 'JPM', 'MA', 'PG', 'AVGO', 'HD', 'CVX', 'MRK',
-    'ABBV', 'KO', 'PEP', 'COST', 'ADBE', 'CSCO', 'TMO', 'ACN', 'NFLX', 'MCD',
-    'ABT', 'LLY', 'NKE', 'INTC', 'TXN', 'DHR', 'VZ', 'UPS', 'PM', 'CRM',
-    'QCOM', 'WFC', 'NEE', 'MS', 'HON', 'UNP', 'RTX', 'ORCL', 'BMY', 'AMD',
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 
+    'AMD',
+    
+    # === MARKET INDICES ETFs (Benchmark & Diversification) ===
+    'SPY',   # S&P 500 ETF (il più liquido e popolare)
+    'VOO',   # Vanguard S&P 500 ETF (commissioni più basse)
+    'QQQ',   # NASDAQ-100 ETF (tech-heavy)
+    'DIA',   # Dow Jones Industrial Average ETF
+    'IWM',   # Russell 2000 ETF (small caps)
+    'VTI',   # Vanguard Total Stock Market ETF (tutto il mercato USA)
     
     # === COMMODITIES & SAFE HAVENS ===
     'GLD',   # Gold ETF
     'SLV',   # Silver ETF
-    'USO',   # Oil ETF
+
     
     # === HIGH VOLATILITY / SPECULATIVE (Growth & Meme Stocks) ===
     'PLTR',  # Palantir - AI/Defense (alta volatilità, sentiment-driven)
     'COIN',  # Coinbase - Crypto proxy (segue Bitcoin)
-    'RIOT',  # Riot Platforms - Bitcoin mining (altissima volatilità)
-    'MARA',  # Marathon Digital - Bitcoin mining
-    'HOOD',  # Robinhood - Fintech speculativo
-    'SOFI',  # SoFi - Fintech growth
-    'RIVN',  # Rivian - EV competitor (volatile)
-    'LCID',  # Lucid Motors - EV luxury (speculativo)
-    'NIO',   # Nio - Chinese EV (alta volatilità)
-    'XPEV',  # XPeng - Chinese EV
-    'AI',    # C3.ai - AI puro (sentiment-driven)
-    'SNOW',  # Snowflake - Cloud/Data (growth stock)
-    'RBLX',  # Roblox - Gaming/Metaverse
-    'U',     # Unity - Gaming engine (volatile)
-    'NET',   # Cloudflare - Edge computing (growth)
-    'DKNG',  # DraftKings - Sports betting (speculativo)
-    'GME',   # GameStop - Meme stock originale
-    'AMC',   # AMC Entertainment - Meme stock
-    'BB',    # BlackBerry - Cybersecurity/Meme
-    'TLRY',  # Tilray - Cannabis (altissima volatilità)
-    'SNDL',  # Sundial - Cannabis penny stock
-    'PLUG',  # Plug Power - Hydrogen fuel (speculativo)
-    'FCEL',  # FuelCell Energy - Hydrogen
-    'SPCE',  # Virgin Galactic - Space tourism (ultra speculativo)
-    'ARKK',  # ARK Innovation ETF (Cathie Wood - growth stocks)
     
     # === SEMI/CHIP SECTOR (Volatile ma fundamentali) ===
     'SMCI',  # Super Micro - AI infrastructure (volatile)
     'ARM',   # ARM Holdings - Chip design (IPO recente)
     'MU',    # Micron - Memory chips (ciclico)
     'MRVL',  # Marvell - Data infrastructure
-    
-    # === BIOTECH (Alta volatilità, catalyst-driven) ===
-    'MRNA',  # Moderna - Biotech (volatile post-COVID)
-    'BNTX',  # BioNTech - mRNA vaccines
-    'CRSP',  # CRISPR Therapeutics - Gene editing
-    'EDIT',  # Editas Medicine - Gene editing
-    'NTLA',  # Intellia Therapeutics - Gene editing
-    
+
     # === TECH VOLATILE ===
     'SHOP',  # Shopify - E-commerce (growth)
-    'SQ',    # Block (Square) - Fintech/Bitcoin
     'PYPL',  # PayPal - Fintech (volatile recentemente)
     'UBER',  # Uber - Gig economy
-    'LYFT',  # Lyft - Ride-sharing
-    'DASH',  # DoorDash - Food delivery
-    'ZM',    # Zoom - Remote work (post-pandemic volatile)
-    'DOCU',  # DocuSign - Digital signatures
-    'TWLO',  # Twilio - Communications API
-    'OKTA',  # Okta - Identity management
-    
+
     # === ENERGY VOLATILE ===
     'FSLR',  # First Solar - Solar energy
     'ENPH',  # Enphase - Solar inverters
@@ -193,9 +161,6 @@ SP500_TOP50 = [
     
     # === CHINESE TECH (Alta volatilità geopolitica) ===
     'BABA',  # Alibaba - E-commerce cinese
-    'PDD',   # Pinduoduo - E-commerce cinese
-    'JD',    # JD.com - E-commerce cinese
-    'BIDU',  # Baidu - Search/AI cinese
 ]
 
 class AdvancedFeatureEngineer:
@@ -552,18 +517,48 @@ def train_stacked_ensemble(
     )
     meta_learner.fit(X_meta_train, y_train, eval_set=[(X_meta_val, y_val)], verbose=False)
 
-    # OPTIMIZATION 5: Adaptive Ensemble Weighting
-    # Combine static meta-learner with dynamic weights based on recent performance
+    # OPTIMIZATION 5: Adaptive Ensemble Weighting with Optuna HP Tuning
+    # Find optimal blend ratio, temperature, and window via Optuna
+    logger.info("    [Level 2 - Tuning] Optimizing adaptive ensemble parameters...")
+
+    def adaptive_objective(trial):
+        alpha = trial.suggest_float('alpha', 0.0, 1.0)  # Adaptive weight
+        temperature = trial.suggest_float('temperature', 0.05, 0.5)
+        window = trial.suggest_int('window', 10, 60)
+
+        # Generate predictions
+        static_pred = meta_learner.predict(X_meta_val)
+        adaptive_pred = adaptive_ensemble_weights(X_meta_val, y_val, temperature, window)
+
+        # Blend
+        blended_pred = alpha * adaptive_pred + (1 - alpha) * static_pred
+
+        # Objective: maximize directional accuracy
+        pred_dir = (blended_pred > 0).astype(int)
+        true_dir = (y_val > 0).astype(int)
+        da = (pred_dir == true_dir).mean()
+
+        return da  # Maximize
+
+    adaptive_study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=42))
+    adaptive_study.optimize(adaptive_objective, n_trials=30, show_progress_bar=False)
+
+    best_alpha = adaptive_study.best_params['alpha']
+    best_temperature = adaptive_study.best_params['temperature']
+    best_window = adaptive_study.best_params['window']
+
+    logger.info(f"    ✓ Best adaptive params: alpha={best_alpha:.3f}, temp={best_temperature:.3f}, window={best_window}")
+
+    # Final predictions with optimized parameters
     static_predictions = meta_learner.predict(X_meta_val)
     adaptive_predictions = adaptive_ensemble_weights(
         base_predictions=X_meta_val,
         y_true=y_val,
-        temperature=0.15,
-        window=30
+        temperature=best_temperature,
+        window=best_window
     )
 
-    # Blend: 70% adaptive + 30% static (meta-learner has global knowledge)
-    final_predictions = 0.7 * adaptive_predictions + 0.3 * static_predictions
+    final_predictions = best_alpha * adaptive_predictions + (1 - best_alpha) * static_predictions
 
     # Metrics - Compare static vs adaptive vs blended
     static_dir_acc = ((static_predictions > 0).astype(int) == (y_val > 0).astype(int)).mean()
@@ -843,13 +838,41 @@ def train_perfect_model(
 
         df = df.dropna(subset=['target'])
 
-        # ========== PREPARE DATA ==========
-        feature_cols = [col for col in df.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']]
+        # ========== CRITICAL FIX: TRUE HOLDOUT TEST SET ==========
+        # Reserve last 252 trading days (12 months) as FINAL TEST SET
+        # This set is NEVER used during training, validation, calibration, or Optuna!
+        logger.info(f"  🔒 Step 2.5/7: Creating TRUE holdout test set...")
 
-        X_raw = df[feature_cols].values
-        y = df['target'].values
-        y_direction = df['target_direction'].values  # For validation metrics
+        HOLDOUT_DAYS = 252  # 12 months
+
+        if len(df) < HOLDOUT_DAYS + 500:
+            logger.warning(f"  ⚠️  Insufficient data for holdout ({len(df)} rows). Minimum: {HOLDOUT_DAYS + 500}")
+            logger.warning(f"  Proceeding without holdout test set (NOT RECOMMENDED!)")
+            df_holdout = None
+            df_training = df
+        else:
+            df_holdout = df.iloc[-HOLDOUT_DAYS:].copy()  # Last 12 months
+            df_training = df.iloc[:-HOLDOUT_DAYS].copy()  # Everything except last 12 months
+
+            logger.info(f"  ✓ Holdout set: {len(df_holdout)} rows (NEVER SEEN during training)")
+            logger.info(f"  ✓ Training set: {len(df_training)} rows (for train/val/calib)")
+
+        # ========== PREPARE DATA ==========
+        feature_cols = [col for col in df_training.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'target', 'target_direction']]
+
+        X_raw = df_training[feature_cols].values
+        y = df_training['target'].values
+        y_direction = df_training['target_direction'].values  # For validation metrics
         feature_names = feature_cols
+
+        # Prepare holdout data (if exists)
+        if df_holdout is not None:
+            X_holdout_raw = df_holdout[feature_cols].values
+            y_holdout = df_holdout['target'].values
+            y_holdout_direction = df_holdout['target_direction'].values
+        else:
+            X_holdout_raw = None
+            y_holdout = None
 
         logger.info(f"  ✓ Initial features: {len(feature_names)}")
 
@@ -866,18 +889,24 @@ def train_perfect_model(
 
         logger.info(f"  ✓ Final features after selection: {len(feature_names)}")
 
-        # ========== TRAIN/VAL SPLIT (TimeSeriesSplit with purging) ==========
+        # ========== TRAIN/VAL/CALIB SPLIT (TimeSeriesSplit with purging) ==========
         # OPTIMIZATION 3: Increase splits from 5 → 10 for more robust validation
         # More splits = less overfitting, more realistic out-of-sample performance
-        splits = purged_time_series_split(n_samples=len(X_raw), n_splits=10, embargo_pct=0.02)
+        # FIX 2024-2025: Use 3-way split to prevent calibration overfitting
+        splits = list(purged_time_series_split(n_samples=len(X_raw), n_splits=10, embargo_pct=0.02))
 
-        # Use last split for validation
-        train_idx, val_idx = splits[-1]
+        # Use last TWO splits: second-to-last for validation, last for calibration
+        train_idx, val_idx = splits[-2]  # Second-to-last split for validation
+        _, calib_idx = splits[-1]         # Last split for calibration testing
 
         X_train_full = X_raw[train_idx]
         y_train_full = y[train_idx]
         X_val = X_raw[val_idx]
         y_val = y[val_idx]
+        X_calib = X_raw[calib_idx]
+        y_calib = y[calib_idx]
+
+        logger.info(f"  ✓ Split sizes: Train={len(X_train_full)}, Val={len(X_val)}, Calib={len(X_calib)}")
 
         # Adversarial validation
         adversarial_validation(X_train_full, X_val)
@@ -886,6 +915,7 @@ def train_perfect_model(
         scaler = RobustScaler()
         X_train_scaled = scaler.fit_transform(X_train_full)
         X_val_scaled = scaler.transform(X_val)
+        X_calib_scaled = scaler.transform(X_calib)
 
         # ========== DATA VALIDATION ==========
         # Critical: Ensure no NaN/Inf in training data
@@ -931,29 +961,46 @@ def train_perfect_model(
             force_cpu=force_cpu
         )
 
-        # ========== CALIBRATION ==========
-        logger.info("  Calibrating predictions...")
-        # Get meta-learner predictions on validation
-        level1_preds = []
+        # ========== CALIBRATION (3-WAY SPLIT FIX) ==========
+        logger.info("  🎯 Step 6/7: Calibrating predictions (proper 3-way split)...")
+
+        # Get meta-learner predictions on VALIDATION set (for training calibrator)
+        level1_preds_val = []
         for model in stacked_result['level1_models'].values():
-            level1_preds.append(model.predict(X_val_scaled))
-        X_meta_val = np.column_stack(level1_preds)
-        uncalibrated_preds = stacked_result['meta_learner'].predict(X_meta_val)
+            level1_preds_val.append(model.predict(X_val_scaled))
+        X_meta_val = np.column_stack(level1_preds_val)
+        uncalibrated_preds_val = stacked_result['meta_learner'].predict(X_meta_val)
 
-        # Isotonic regression calibration
+        # Train calibrator on VALIDATION predictions
         calibrator = IsotonicRegression(out_of_bounds='clip')
-        calibrator.fit(uncalibrated_preds, y_val)
-        calibrated_preds = calibrator.predict(uncalibrated_preds)
+        calibrator.fit(uncalibrated_preds_val, y_val)
 
-        calibrated_mae = mean_absolute_error(y_val, calibrated_preds)
+        logger.info(f"    ✓ Calibrator trained on {len(y_val)} validation samples")
 
-        # Calculate directional accuracy for calibrated predictions
-        calibrated_dir_pred = (calibrated_preds > 0).astype(int)
-        actual_dir = (y_val > 0).astype(int)
-        calibrated_dir_accuracy = (calibrated_dir_pred == actual_dir).mean()
+        # TEST calibrator on CALIBRATION set (never seen before!)
+        level1_preds_calib = []
+        for model in stacked_result['level1_models'].values():
+            level1_preds_calib.append(model.predict(X_calib_scaled))
+        X_meta_calib = np.column_stack(level1_preds_calib)
+        uncalibrated_preds_calib = stacked_result['meta_learner'].predict(X_meta_calib)
+        calibrated_preds_calib = calibrator.predict(uncalibrated_preds_calib)
 
-        logger.info(f"  ✓ Calibrated MAE: {calibrated_mae:.6f}")
-        logger.info(f"  ✓ Calibrated Directional Accuracy: {calibrated_dir_accuracy*100:.2f}%")
+        # Metrics on CALIBRATION set (true out-of-sample!)
+        calibrated_mae = mean_absolute_error(y_calib, calibrated_preds_calib)
+        uncalibrated_mae_calib = mean_absolute_error(y_calib, uncalibrated_preds_calib)
+
+        # Directional accuracy on CALIBRATION set
+        calibrated_dir_pred = (calibrated_preds_calib > 0).astype(int)
+        uncalibrated_dir_pred = (uncalibrated_preds_calib > 0).astype(int)
+        actual_dir_calib = (y_calib > 0).astype(int)
+
+        calibrated_dir_accuracy = (calibrated_dir_pred == actual_dir_calib).mean()
+        uncalibrated_dir_accuracy_calib = (uncalibrated_dir_pred == actual_dir_calib).mean()
+
+        logger.info(f"  ✓ Calibration Test Results (on holdout calibration set):")
+        logger.info(f"    - Uncalibrated MAE: {uncalibrated_mae_calib:.6f}, DA: {uncalibrated_dir_accuracy_calib*100:.2f}%")
+        logger.info(f"    - Calibrated MAE:   {calibrated_mae:.6f}, DA: {calibrated_dir_accuracy*100:.2f}%")
+        logger.info(f"    - Improvement:      MAE {((uncalibrated_mae_calib-calibrated_mae)/uncalibrated_mae_calib*100):+.1f}%, DA {((calibrated_dir_accuracy-uncalibrated_dir_accuracy_calib)*100):+.1f}%")
 
         # ========== CREATE UNIFIED ENSEMBLE MODEL ==========
         logger.info("  Creating UnifiedEnsembleModel...")

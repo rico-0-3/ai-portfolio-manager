@@ -126,13 +126,13 @@ class MetaModel:
             # Convert predictions to expected return format
             expected_returns = pd.Series(predictions)
             
-            # Calculate optimal weights
-            weights = optimizer.optimize_portfolio(
-                expected_returns=expected_returns,
-                returns_df=historical_returns,
-                method='markowitz'  # Use default method for now
+            # Use Markowitz optimization (mean-variance)
+            weights = optimizer.markowitz_optimization(
+                returns=historical_returns,
+                ml_predictions=expected_returns  # Use ML predictions as expected returns
             )
             
+            # markowitz_optimization returns Dict[str, float], exactly what we need
             return weights
             
         except Exception as e:
